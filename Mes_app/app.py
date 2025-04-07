@@ -105,7 +105,7 @@ async def get_all_machines(limit: int = 100):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT transaction_id, work_order_id, timestamp, equipment,
-               operator, sensor_data, contextual_info
+               operator, sensor_data, contextual_info, production_metrics
         FROM machines ORDER BY timestamp DESC LIMIT ?
     """, (limit,))
     
@@ -118,7 +118,8 @@ async def get_all_machines(limit: int = 100):
             "equipment": row[3],
             "operator": row[4],
             "sensor_data": json.loads(row[5]),
-            "contextual_info": json.loads(row[6])
+            "contextual_info": json.loads(row[6]),
+            "production_metrics": json.loads(row[7])  # Nuevo campo
         })
     conn.close()
     return machines
@@ -129,7 +130,7 @@ async def get_machine_records(equipment: str, limit: int = 50):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT transaction_id, work_order_id, timestamp, operator,
-               sensor_data, contextual_info
+               sensor_data, contextual_info, production_metrics
         FROM machines 
         WHERE equipment = ? 
         ORDER BY timestamp DESC 
@@ -144,7 +145,8 @@ async def get_machine_records(equipment: str, limit: int = 50):
             "timestamp": row[2],
             "operator": row[3],
             "sensor_data": json.loads(row[4]),
-            "contextual_info": json.loads(row[5])
+            "contextual_info": json.loads(row[5]),
+            "production_metrics": json.loads(row[6])  # Nuevo campo
         })
     conn.close()
     

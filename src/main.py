@@ -5,6 +5,7 @@ from typing import Optional, List, Dict
 import statistics
 from sentence_transformers import SentenceTransformer, util
 import torch
+import json
 
 mcp = FastMCP("Industrial Analytics MCP")
 API_URL = "http://api:5000"
@@ -68,6 +69,8 @@ async def production_dashboard(ctx: Context) -> str:
 # =============================================
 # HERRAMIENTAS DE ANÁLISIS DE PRODUCCIÓN
 # =============================================
+
+
 
 @mcp.tool()
 async def product_analysis(ctx: Context, product_type: str) -> str:
@@ -139,135 +142,10 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
 # =============================================
 
 @mcp.tool()
-async def predict_temperature(ctx: Context, equipment: str, hours: int = 24) -> str:
-    """Predice la temperatura futura basada en tendencias recientes"""
+async def predict_production(ctx: Context, product_type: str, hours: int ) -> str:
+    """Predice la producción esperada basada en patrones históricos"""
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}")
-        records = response.json()
-        
-        if len(records) < 5:
-            return f"Insuficientes datos para {equipment} (mínimo 5 registros)"
-        
-        # Preparar datos para análisis
-        temps = [r["sensor_data"]["temperature"] for r in records[:24]]  # Últimas 24 lecturas
-        timestamps = [datetime.fromisoformat(r["timestamp"]) for r in records[:24]]
-        time_diffs = [(timestamps[i]-timestamps[i+1]).total_seconds()/3600 for i in range(len(timestamps)-1)]
-        
-        # Calcular tendencia
-        temp_changes = [temps[i]-temps[i+1] for i in range(len(temps)-1)]
-        hourly_trend = sum(temp_changes[i]/time_diffs[i] for i in range(len(temp_changes))) / len(temp_changes)
-        
-        # Predicción lineal simple
-        current_temp = temps[0]
-        predicted_temp = current_temp + (hourly_trend * hours)
-        
-        # Obtener límites de compliance
-        rules = records[0]["contextual_info"]["compliance_rules"]
-        temp_limit = rules["temperature_limit"]
-        
-        # Evaluar riesgo
-        risk = ""
-        if predicted_temp > temp_limit:
-            risk = f"🚨 ALERTA: Predicción excede límite de {temp_limit}°C"
-        elif predicted_temp > temp_limit * 0.9:
-            risk = f"⚠️ Advertencia: Se aproxima al límite de {temp_limit}°C"
-        
-        return f"""
-        🔮 Predicción de Temperatura para {equipment}:
-        - Temperatura actual: {current_temp}°C
-        - Tendencia horaria: {'+' if hourly_trend > 0 else ''}{hourly_trend:.2f}°C/hora
-        - Predicción en {hours} horas: {predicted_temp:.1f}°C
-        - Límite seguro: {temp_limit}°C
-        {risk}
-        """
-
-@mcp.tool()
-async def predict_maintenance(ctx: Context, equipment: str, forecast_hours: int = 48) -> str:
-    """Predice necesidad de mantenimiento en las próximas X horas"""
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}")
-        records = response.json()
-        
-        if len(records) < 10:
-            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
-        
-        # Analizar múltiples parámetros
-        temps = [r["sensor_data"]["temperature"] for r in records[:24]]
-        pressures = [r["sensor_data"]["pressure"] for r in records[:24]]
-        vibrations = [r["sensor_data"]["vibration"] for r in records[:24]]
-        rules = records[0]["contextual_info"]["compliance_rules"]
-        
-        # Calcular tendencias por hora
-        def calculate_hourly_trend(values):
-            changes = [values[i]-values[i+1] for i in range(len(values)-1)]
-            time_diffs = [(datetime.fromisoformat(records[i]["timestamp"]) - 
-                          datetime.fromisoformat(records[i+1]["timestamp"])).total_seconds()/3600 
-                         for i in range(len(values)-1)]
-            return sum(c/d for c,d in zip(changes, time_diffs)) / len(changes)
-        
-        temp_trend = calculate_hourly_trend(temps)
-        pressure_trend = calculate_hourly_trend(pressures)
-        vibe_trend = calculate_hourly_trend(vibrations)
-        
-        # Generar predicciones
-        current_values = {
-            'temp': temps[0],
-            'pressure': pressures[0],
-            'vibration': vibrations[0]
-        }
-        
-        predicted_values = {
-            'temp': current_values['temp'] + (temp_trend * forecast_hours),
-            'pressure': current_values['pressure'] + (pressure_trend * forecast_hours),
-            'vibration': current_values['vibration'] + (vibe_trend * forecast_hours)
-        }
-        
-        # Evaluar riesgos
-        alerts = []
-        if predicted_values['temp'] > rules['temperature_limit']:
-            alerts.append(f"Temperatura predicha: {predicted_values['temp']:.1f}°C > {rules['temperature_limit']}°C")
-        if predicted_values['pressure'] > rules['pressure_limit']:
-            alerts.append(f"Presión predicha: {predicted_values['pressure']:.1f}psi > {rules['pressure_limit']}psi")
-        if predicted_values['vibration'] > 4.0:
-            alerts.append(f"Vibración predicha: {predicted_values['vibration']:.1f}mm/s > 4.0mm/s")
-        
-        # Calcular probabilidad de fallo
-        risk_score = 0
-        if alerts: risk_score = min(90 + (len(alerts)*5), 100)
-        
-        maintenance_advice = []
-        if risk_score > 70:
-            maintenance_advice.append("🔧 Realizar mantenimiento preventivo inmediato")
-            maintenance_advice.append("🛑 Considerar parada no programada")
-        elif risk_score > 40:
-            maintenance_advice.append("🔧 Programar mantenimiento pronto")
-        else:
-            maintenance_advice.append("✅ Operación normal - Sin mantenimiento urgente")
-        
-        return f"""
-        🛠️ Predicción de Mantenimiento para {equipment} (próximas {forecast_hours} horas):
-        
-        Parámetros actuales:
-        - Temp: {current_values['temp']}°C (Límite: {rules['temperature_limit']}°C)
-        - Presión: {current_values['pressure']}psi (Límite: {rules['pressure_limit']}psi)
-        - Vibración: {current_values['vibration']}mm/s
-        
-        Tendencias horarias:
-        - Temp: {'+' if temp_trend > 0 else ''}{temp_trend:.3f}°C/hora
-        - Presión: {'+' if pressure_trend > 0 else ''}{pressure_trend:.3f}psi/hora
-        - Vibración: {'+' if vibe_trend > 0 else ''}{vibe_trend:.3f}mm/s/hora
-        
-        {'🚨 Alertas:' if alerts else '✅ Sin alertas'}
-        {chr(10).join('- ' + alert for alert in alerts)}
-        
-        Riesgo estimado: {risk_score}%
-        {chr(10).join(maintenance_advice)}
-        """
-
-@mcp.tool()
-async def predict_production(ctx: Context, product_type: str, hours: int = 24) -> str:
-    """Predice la producción esperada para un tipo de producto"""
-    async with httpx.AsyncClient() as client:
+        # Obtener todos los registros relevantes
         response = await client.get(f"{API_URL}/machines/")
         relevant_records = [
             r for r in response.json() 
@@ -277,44 +155,213 @@ async def predict_production(ctx: Context, product_type: str, hours: int = 24) -
         if len(relevant_records) < 5:
             return f"Insuficientes datos para {product_type} (mínimo 5 registros)"
         
-        # Agrupar por equipos
-        equipment_data = {}
-        for record in relevant_records[:24]:  # Últimas 24 horas
-            eq = record["equipment"]
-            if eq not in equipment_data:
-                equipment_data[eq] = []
-            equipment_data[eq].append(record)
+        # Preparar datos estructurados
+        production_data = []
+        equipment_stats = {}
         
-        # Predecir por equipo
-        total_predicted = 0
-        equipment_predictions = []
-        
-        for eq, records in equipment_data.items():
-            if len(records) < 3:
-                continue
-                
-            quantities = [r["production_metrics"]["quantity"] for r in records]
-            timestamps = [datetime.fromisoformat(r["timestamp"]) for r in records]
+        for r in relevant_records[:1000]:  # Últimas 24 horas
+            record = {
+                "time": r["timestamp"],
+                "equipment": r["equipment"],
+                "quantity": r["production_metrics"]["quantity"],
+                "operator": r["operator"],
+                "conditions": {
+                    "temp": r["sensor_data"]["temperature"],
+                    "pressure": r["sensor_data"]["pressure"]
+                }
+            }
+            production_data.append(record)
             
-            # Calcular tasa de producción por hora
-            time_diffs = [(timestamps[i]-timestamps[i+1]).total_seconds()/3600 for i in range(len(timestamps)-1)]
-            prod_rates = [quantities[i]/time_diffs[i] for i in range(len(time_diffs))]
-            avg_rate = statistics.mean(prod_rates)
-            
-            predicted = avg_rate * hours
-            total_predicted += predicted
-            equipment_predictions.append(f"- {eq}: {predicted:.1f} unidades")
+            # Estadísticas por equipo
+            if r["equipment"] not in equipment_stats:
+                equipment_stats[r["equipment"]] = []
+            equipment_stats[r["equipment"]].append(r["production_metrics"]["quantity"])
         
-        if not equipment_predictions:
-            return "No se pudo calcular predicción (datos insuficientes)"
+        # Calcular métricas base
+        total_recent = sum(r["production_metrics"]["quantity"] for r in relevant_records[:24])
+        avg_per_hour = total_recent / 24 if len(relevant_records) >= 24 else total_recent / len(relevant_records)
+        
+        # Construir contexto de análisis
+        analysis_context = {
+            "product_type": product_type,
+            "forecast_hours": hours,
+            "recent_production": total_recent,
+            "avg_hourly_rate": round(avg_per_hour, 2),
+            "equipment_count": len(equipment_stats),
+            "top_performers": {
+                eq: max(qty) 
+                for eq, qty in list(equipment_stats.items())[:3]  # Mostrar solo 3 equipos
+            },
+            "sample_data": production_data[:3]  # Mostrar 3 muestras
+        }
         
         return f"""
-        🔮 Predicción de Producción para {product_type} (próximas {hours} horas):
-        - Producción total estimada: {total_predicted:.1f} unidades
-        - Desglose por equipo:
-        {chr(10).join(equipment_predictions)}
+        📈 Datos para predicción de producción de {product_type} (próximas {hours} horas):
         
-        Basado en el rendimiento promedio reciente de {len(equipment_predictions)} equipos
+        **Contexto de análisis:**
+        ```json
+        {json.dumps(analysis_context, indent=2)}
+        ```
+        
+        **Instrucciones para el LLM:**
+        1. Analiza patrones de producción por equipo
+        2. Considera variaciones por turno/temporalidad
+        3. Calcula proyección considerando capacidad actual
+        4. Identifica cuellos de botella potenciales
+        5. Proporciona rango probable (min-max)
+        """
+
+
+@mcp.tool()
+async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
+    """Predice la temperatura futura basada en análisis de patrones"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{API_URL}/machines/{equipment}")
+        records = response.json()
+        
+        if len(records) < 5:
+            return f"Insuficientes datos para {equipment} (mínimo 5 registros)"
+        
+        # Preparar datos estructurados para análisis
+        temp_data = []
+        for r in records[:1000]:  # Últimas 24 lecturas
+            temp_data.append({
+                "time": r["timestamp"],
+                "temperature": r["sensor_data"]["temperature"],
+                "pressure": r["sensor_data"]["pressure"],
+                "vibration": r["sensor_data"]["vibration"],
+                "production": r["production_metrics"]["quantity"]
+            })
+        
+        # Construir contexto para el LLM
+        analysis_context = {
+            "equipment": equipment,
+            "timeframe_hours": hours,
+            "temperature_limit": records[0]["contextual_info"]["compliance_rules"]["temperature_limit"],
+            "data_samples": temp_data[:10]  # Mostrar solo 5 muestras para no saturar
+        }
+        
+        return f"""
+        🔍 Datos para predicción de temperatura en {equipment} (próximas {hours} horas):
+        
+        **Contexto de análisis:**
+        ```json
+        {json.dumps(analysis_context, indent=2)}
+        ```
+        
+        **Instrucciones para el LLM:**
+        Analiza los patrones y proporciona:
+        1. Temperatura predicha
+        2. Factores clave influyentes
+        3. Recomendaciones operativas
+        4. Señales de alerta temprana
+        """
+
+@mcp.tool()
+async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) -> str:
+    """Predice necesidades de mantenimiento basado en patrones"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{API_URL}/machines/{equipment}")
+        records = response.json()
+        
+        if len(records) < 10:
+            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
+        
+        # Preparar datos estructurados
+        maintenance_data = []
+        for r in records[:1000]:  # Últimas 24 lecturas
+            maintenance_data.append({
+                "time": r["timestamp"],
+                "sensors": {
+                    "temp": r["sensor_data"]["temperature"],
+                    "pressure": r["sensor_data"]["pressure"],
+                    "vibration": r["sensor_data"]["vibration"]
+                },
+                "production": {
+                    "quantity": r["production_metrics"]["quantity"],
+                    "type": r["production_metrics"]["product_type"]
+                }
+            })
+        
+        # Construir contexto de análisis
+        analysis_context = {
+            "equipment": equipment,
+            "forecast_hours": horizon_hours,
+            "limits": records[0]["contextual_info"]["compliance_rules"],
+            "key_metrics": {
+                "avg_temp": statistics.mean(r["sensor_data"]["temperature"] for r in records[:24]),
+                "max_vibration": max(r["sensor_data"]["vibration"] for r in records[:24])
+            },
+            "recent_samples": maintenance_data[:3]  # Mostrar 3 muestras representativas
+        }
+        
+        return f"""
+        🛠️ Datos para predicción de mantenimiento en {equipment} (próximas {horizon_hours} horas):
+        
+        **Contexto de análisis:**
+        ```json
+        {json.dumps(analysis_context, indent=2)}
+        ```
+        
+        **Instrucciones para el LLM:**
+        1. Evalúa patrones de desgaste
+        2. Identifica componentes críticos
+        3. Estima probabilidad de fallo
+        4. Sugiere acciones preventivas
+        """
+
+@mcp.tool()
+async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
+    """Identifica patrones complejos en el comportamiento del equipo"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{API_URL}/machines/{equipment}")
+        records = response.json()
+        
+        if len(records) < 10:
+            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
+        
+        # Preparar datos para análisis
+        pattern_data = []
+        for r in records[:1000]:  # Últimos 50 registros
+            pattern_data.append({
+                "time": r["timestamp"],
+                "temp": r["sensor_data"]["temperature"],
+                "pressure": r["sensor_data"]["pressure"],
+                "vibration": r["sensor_data"]["vibration"],
+                "production": r["production_metrics"]["quantity"],
+                "product_type": r["production_metrics"]["product_type"]
+            })
+        
+        # Resumen estadístico
+        stats = {
+            "temp_range": (min(r["sensor_data"]["temperature"] for r in records), 
+                          max(r["sensor_data"]["temperature"] for r in records)),
+            "pressure_avg": statistics.mean(r["sensor_data"]["pressure"] for r in records),
+            "production_variation": {
+                "min": min(r["production_metrics"]["quantity"] for r in records),
+                "max": max(r["production_metrics"]["quantity"] for r in records)
+            }
+        }
+        
+        return f"""
+        🔎 Datos para análisis de patrones en {equipment}:
+        
+        **Resumen estadístico:**
+        ```json
+        {json.dumps(stats, indent=2)}
+        ```
+        
+        **Muestras de datos temporales:**
+        ```json
+        {json.dumps(pattern_data[:3], indent=2)}
+        ```
+        [Mostrando 3 de {len(pattern_data)} registros disponibles]
+        
+        **Instrucciones para el LLM:**
+        1. Analiza correlaciones entre variables
+        2. Identifica patrones temporales
+        3. Detecta anomalías significativas
+        4. Sugiere optimizaciones operativas
         """
 
 # =============================================
