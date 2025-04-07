@@ -3,26 +3,56 @@ import sqlite3
 from pydantic import BaseModel
 from datetime import datetime
 import PyPDF2
+import sqlite3
+from datetime import datetime
+import json
+from typing import Optional
 
 app = FastAPI()
 
-# Modelo para los datos de entrada de máquinas
-class MachineRecord(BaseModel):
-    maquina_nombre: str
-    status: str
-    temperatura: float
-    timestamp: datetime
+class ProductionMetrics(BaseModel):
+    quantity: int
+    product_type: str
 
-# Inicializar la base de datos con tablas para máquinas y PDFs
+# Modelos de datos
+class SensorData(BaseModel):
+    temperature: float
+    pressure: float
+    vibration: float
+
+class ComplianceRules(BaseModel):
+    temperature_limit: float
+    pressure_limit: float
+    operator_certification_required: bool
+    process_notes: Optional[str] = None
+
+class ContextualInfo(BaseModel):
+    compliance_rules: ComplianceRules
+
+class MachineRecord(BaseModel):
+    transaction_id: str
+    work_order_id: str
+    timestamp: datetime
+    equipment: str
+    operator: str
+    sensor_data: SensorData
+    contextual_info: ContextualInfo
+    production_metrics: ProductionMetrics  # Nuevo campo
+
+# Inicialización de la base de datos
 def init_db():
     conn = sqlite3.connect("database.db")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS machines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            maquina_nombre TEXT NOT NULL,
-            status TEXT NOT NULL,
-            temperatura REAL NOT NULL,
-            timestamp DATETIME NOT NULL
+            transaction_id TEXT NOT NULL UNIQUE,
+            work_order_id TEXT NOT NULL,
+            timestamp DATETIME NOT NULL,
+            equipment TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            sensor_data TEXT NOT NULL,
+            contextual_info TEXT NOT NULL,
+            production_metrics TEXT NOT NULL 
         )
     """)
     conn.execute("""
@@ -40,45 +70,87 @@ def init_db():
 async def startup_event():
     init_db()
 
-# Endpoint para insertar un registro de máquina
+# Endpoints para máquinas
 @app.post("/machines/")
 async def create_machine_record(record: MachineRecord):
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO machines (maquina_nombre, status, temperatura, timestamp)
-        VALUES (?, ?, ?, ?)
-    """, (record.maquina_nombre, record.status, record.temperatura, record.timestamp.isoformat()))
-    conn.commit()
-    conn.close()
-    return {"message": "Registro creado exitosamente"}
+    
+    try:
+        cursor.execute("""
+            INSERT INTO machines (
+                transaction_id, work_order_id, timestamp, equipment,
+                operator, sensor_data, contextual_info, production_metrics
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            record.transaction_id,
+            record.work_order_id,
+            record.timestamp.isoformat(),
+            record.equipment,
+            record.operator,
+            record.sensor_data.json(),
+            record.contextual_info.json(),
+            record.production_metrics.json()  # Nuevo campo
+        ))
+        conn.commit()
+        return {"message": "Registro creado exitosamente"}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Transaction ID ya existe")
+    finally:
+        conn.close()
 
-# Endpoint para obtener todos los registros de máquinas
 @app.get("/machines/")
-async def get_all_machines():
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT maquina_nombre, status, temperatura, timestamp FROM machines ORDER BY timestamp DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return [{"maquina_nombre": row[0], "status": row[1], "temperatura": row[2], "timestamp": row[3]} for row in rows]
-
-# Endpoint para obtener registros por máquina
-@app.get("/machines/{maquina_nombre}")
-async def get_machine_records(maquina_nombre: str):
+async def get_all_machines(limit: int = 100):
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT maquina_nombre, status, temperatura, timestamp 
-        FROM machines 
-        WHERE maquina_nombre = ? 
-        ORDER BY timestamp DESC
-    """, (maquina_nombre,))
-    rows = cursor.fetchall()
+        SELECT transaction_id, work_order_id, timestamp, equipment,
+               operator, sensor_data, contextual_info
+        FROM machines ORDER BY timestamp DESC LIMIT ?
+    """, (limit,))
+    
+    machines = []
+    for row in cursor.fetchall():
+        machines.append({
+            "transaction_id": row[0],
+            "work_order_id": row[1],
+            "timestamp": row[2],
+            "equipment": row[3],
+            "operator": row[4],
+            "sensor_data": json.loads(row[5]),
+            "contextual_info": json.loads(row[6])
+        })
     conn.close()
-    if not rows:
-        raise HTTPException(status_code=404, detail="Máquina no encontrada")
-    return [{"maquina_nombre": row[0], "status": row[1], "temperatura": row[2], "timestamp": row[3]} for row in rows]
+    return machines
+
+@app.get("/machines/{equipment}")
+async def get_machine_records(equipment: str, limit: int = 50):
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT transaction_id, work_order_id, timestamp, operator,
+               sensor_data, contextual_info
+        FROM machines 
+        WHERE equipment = ? 
+        ORDER BY timestamp DESC 
+        LIMIT ?
+    """, (equipment, limit))
+    
+    records = []
+    for row in cursor.fetchall():
+        records.append({
+            "transaction_id": row[0],
+            "work_order_id": row[1],
+            "timestamp": row[2],
+            "operator": row[3],
+            "sensor_data": json.loads(row[4]),
+            "contextual_info": json.loads(row[5])
+        })
+    conn.close()
+    
+    if not records:
+        raise HTTPException(status_code=404, detail="Equipo no encontrado")
+    return records
 
 # Endpoint para subir un PDF
 @app.post("/pdfs/")
