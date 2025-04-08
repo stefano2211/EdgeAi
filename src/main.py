@@ -12,7 +12,7 @@ API_URL = "http://api:5000"
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # =============================================
-# HERRAMIENTAS DE MONITOREO EN TIEMPO REAL
+# HERRAMIENTAS DE MONITOREO EN TIEMPO REAL MESS
 # =============================================
 
 @mcp.tool()
