@@ -5,7 +5,7 @@ from datetime import datetime
 from sentence_transformers import SentenceTransformer, util
 import torch
 
-# Configuración del servidor MCP
+# Configuración del servidor MCP Mess
 mcp = FastMCP("Mess Data")
 API_URL = "http://api:5000"
 
