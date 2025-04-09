@@ -17,7 +17,6 @@ model = SentenceTransformer('all-MiniLM-L6-v2')
 
 @mcp.tool()
 async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str:
-    """Obtiene el estado actual de equipos específicos o todos los equipos"""
     endpoint = f"{API_URL}/machines/{equipment}" if equipment else f"{API_URL}/machines/"
     
     async with httpx.AsyncClient() as client:
@@ -28,15 +27,16 @@ async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str
         machines = response.json() if isinstance(response.json(), list) else [response.json()]
         
         report = ["🏭 Estado del Equipamiento:"]
-        for machine in machines[:15]:  # Limitar a 15 resultados
+        for machine in machines[:15]:
             status = (
                 f"\n🔧 {machine['equipment']} ({machine['production_metrics']['product_type']})"
                 f"\n- Operador: {machine['operator']}"
                 f"\n- Producción: {machine['production_metrics']['quantity']} unidades"
-                f"\n- Sensores: {machine['sensor_data']['temperature']}°C, "
-                f"{machine['sensor_data']['pressure']} psi, "
+                f"\n- Sensores: {machine['sensor_data']['temperature']}°C (Límite: {machine['contextual_info']['compliance_rules']['temperature_limit']}°C), "
+                f"{machine['sensor_data']['pressure']} psi (Límite: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi), "
                 f"{machine['sensor_data']['vibration']} mm/s"
                 f"\n- Última actualización: {machine['timestamp']}"
+                f"\n- Notas de cumplimiento: {machine['contextual_info']['compliance_rules']['process_notes']}"
             )
             report.append(status)
         
@@ -44,7 +44,6 @@ async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str
 
 @mcp.tool()
 async def production_dashboard(ctx: Context) -> str:
-    """Muestra un resumen general de la producción"""
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/")
         machines = response.json()
@@ -52,18 +51,23 @@ async def production_dashboard(ctx: Context) -> str:
         if not machines:
             return "No hay datos de producción disponibles"
         
-        # Cálculo de métricas
         total_production = sum(m["production_metrics"]["quantity"] for m in machines)
         unique_products = {m["production_metrics"]["product_type"] for m in machines}
         active_equipment = {m["equipment"] for m in machines}
         avg_temp = statistics.mean(m["sensor_data"]["temperature"] for m in machines)
         
+        # Usar el primer equipo como referencia para compliance_rules
+        rules = machines[0]["contextual_info"]["compliance_rules"]
         return f"""
         📊 Dashboard de Producción:
         - Total producido: {total_production} unidades
         - Tipos de producto: {len(unique_products)} ({', '.join(unique_products)})
         - Equipos activos: {len(active_equipment)}
-        - Temperatura promedio: {avg_temp:.1f}°C
+        - Temperatura promedio: {avg_temp:.1f}°C (Límite típico: {rules['temperature_limit']}°C)
+        - Normas de cumplimiento relevantes:
+          - Límite de presión: {rules['pressure_limit']} psi
+          - Certificación de operador: {'Requerida' if rules['operator_certification_required'] else 'No requerida'}
+          - Notas de proceso: {rules['process_notes']}
         """
 
 # =============================================
@@ -74,7 +78,6 @@ async def production_dashboard(ctx: Context) -> str:
 
 @mcp.tool()
 async def product_analysis(ctx: Context, product_type: str) -> str:
-    """Analiza la producción de un tipo de producto específico"""
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/")
         machines = [m for m in response.json() if m["production_metrics"]["product_type"].lower() == product_type.lower()]
@@ -85,10 +88,9 @@ async def product_analysis(ctx: Context, product_type: str) -> str:
         total = sum(m["production_metrics"]["quantity"] for m in machines)
         equipment_count = len({m["equipment"] for m in machines})
         avg_per_batch = total / len(machines)
-        
-        # Análisis de sensores para este producto
         temps = [m["sensor_data"]["temperature"] for m in machines]
         avg_temp = statistics.mean(temps)
+        rules = machines[0]["contextual_info"]["compliance_rules"]
         
         return f"""
         🍞 Análisis de {product_type}:
@@ -96,12 +98,14 @@ async def product_analysis(ctx: Context, product_type: str) -> str:
         - Lotes registrados: {len(machines)}
         - Equipos utilizados: {equipment_count}
         - Promedio por lote: {avg_per_batch:.1f} unidades
-        - Temperatura promedio: {avg_temp:.1f}°C
+        - Temperatura promedio: {avg_temp:.1f}°C (Límite: {rules['temperature_limit']}°C)
+        - Contexto de cumplimiento:
+          - Límite de presión: {rules['pressure_limit']} psi
+          - Notas operativas: {rules['process_notes']}
         """
 
 @mcp.tool()
 async def equipment_productivity(ctx: Context, equipment: str) -> str:
-    """Evalúa la productividad de un equipo específico"""
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/{equipment}")
         records = response.json()
@@ -109,7 +113,6 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
         if not records:
             return f"No hay datos para {equipment}"
         
-        # Agrupar por producto
         product_stats = {}
         for record in records:
             product = record["production_metrics"]["product_type"]
@@ -124,7 +127,6 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
             if record["timestamp"] > product_stats[product]['last_production']:
                 product_stats[product]['last_production'] = record["timestamp"]
         
-        # Generar reporte
         report = [f"📈 Productividad de {equipment}:"]
         for product, stats in product_stats.items():
             report.append(
@@ -134,6 +136,14 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
                 f"\n- Promedio: {stats['total']/stats['count']:.1f} unidades/lote"
                 f"\n- Última producción: {stats['last_production'][:10]}"
             )
+        # Integrar compliance_rules
+        rules = records[0]["contextual_info"]["compliance_rules"]
+        report.append(
+            f"\n📜 Contexto operativo:"
+            f"\n- Temperatura máxima permitida: {rules['temperature_limit']}°C"
+            f"\n- Presión máxima permitida: {rules['pressure_limit']} psi"
+            f"\n- Notas: {rules['process_notes']}"
+        )
         
         return "\n".join(report)
 
@@ -143,9 +153,7 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
 
 @mcp.tool()
 async def predict_production(ctx: Context, product_type: str, hours: int ) -> str:
-    """Predice la producción esperada basada en patrones históricos"""
     async with httpx.AsyncClient() as client:
-        # Obtener todos los registros relevantes
         response = await client.get(f"{API_URL}/machines/")
         relevant_records = [
             r for r in response.json() 
@@ -155,11 +163,10 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
         if len(relevant_records) < 5:
             return f"Insuficientes datos para {product_type} (mínimo 5 registros)"
         
-        # Preparar datos estructurados
         production_data = []
         equipment_stats = {}
         
-        for r in relevant_records[:1000]:  # Últimas 24 horas
+        for r in relevant_records[:1000]:
             record = {
                 "time": r["timestamp"],
                 "equipment": r["equipment"],
@@ -171,17 +178,14 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
                 }
             }
             production_data.append(record)
-            
-            # Estadísticas por equipo
             if r["equipment"] not in equipment_stats:
                 equipment_stats[r["equipment"]] = []
             equipment_stats[r["equipment"]].append(r["production_metrics"]["quantity"])
         
-        # Calcular métricas base
         total_recent = sum(r["production_metrics"]["quantity"] for r in relevant_records[:24])
         avg_per_hour = total_recent / 24 if len(relevant_records) >= 24 else total_recent / len(relevant_records)
+        rules = relevant_records[0]["contextual_info"]["compliance_rules"]
         
-        # Construir contexto de análisis
         analysis_context = {
             "product_type": product_type,
             "forecast_hours": hours,
@@ -190,9 +194,14 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
             "equipment_count": len(equipment_stats),
             "top_performers": {
                 eq: max(qty) 
-                for eq, qty in list(equipment_stats.items())[:3]  # Mostrar solo 3 equipos
+                for eq, qty in list(equipment_stats.items())[:3]
             },
-            "sample_data": production_data[:3]  # Mostrar 3 muestras
+            "sample_data": production_data[:3],
+            "compliance_rules": {
+                "temperature_limit": rules["temperature_limit"],
+                "pressure_limit": rules["pressure_limit"],
+                "process_notes": rules["process_notes"]
+            }
         }
         
         return f"""
@@ -214,7 +223,6 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
 
 @mcp.tool()
 async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
-    """Predice la temperatura futura basada en análisis de patrones"""
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/{equipment}")
         records = response.json()
@@ -222,9 +230,8 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
         if len(records) < 5:
             return f"Insuficientes datos para {equipment} (mínimo 5 registros)"
         
-        # Preparar datos estructurados para análisis
         temp_data = []
-        for r in records[:1000]:  # Últimas 24 lecturas
+        for r in records[:1000]:
             temp_data.append({
                 "time": r["timestamp"],
                 "temperature": r["sensor_data"]["temperature"],
@@ -233,12 +240,16 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
                 "production": r["production_metrics"]["quantity"]
             })
         
-        # Construir contexto para el LLM
+        rules = records[0]["contextual_info"]["compliance_rules"]
         analysis_context = {
             "equipment": equipment,
             "timeframe_hours": hours,
-            "temperature_limit": records[0]["contextual_info"]["compliance_rules"]["temperature_limit"],
-            "data_samples": temp_data[:10]  # Mostrar solo 5 muestras para no saturar
+            "temperature_limit": rules["temperature_limit"],
+            "data_samples": temp_data[:10],
+            "compliance_rules": {
+                "pressure_limit": rules["pressure_limit"],
+                "process_notes": rules["process_notes"]
+            }
         }
         
         return f"""
@@ -259,7 +270,6 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
 
 @mcp.tool()
 async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) -> str:
-    """Predice necesidades de mantenimiento basado en patrones"""
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/{equipment}")
         records = response.json()
@@ -267,9 +277,8 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
         if len(records) < 10:
             return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
         
-        # Preparar datos estructurados
         maintenance_data = []
-        for r in records[:1000]:  # Últimas 24 lecturas
+        for r in records[:1000]:
             maintenance_data.append({
                 "time": r["timestamp"],
                 "sensors": {
@@ -283,16 +292,16 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
                 }
             })
         
-        # Construir contexto de análisis
+        rules = records[0]["contextual_info"]["compliance_rules"]
         analysis_context = {
             "equipment": equipment,
             "forecast_hours": horizon_hours,
-            "limits": records[0]["contextual_info"]["compliance_rules"],
+            "limits": rules,
             "key_metrics": {
                 "avg_temp": statistics.mean(r["sensor_data"]["temperature"] for r in records[:24]),
                 "max_vibration": max(r["sensor_data"]["vibration"] for r in records[:24])
             },
-            "recent_samples": maintenance_data[:3]  # Mostrar 3 muestras representativas
+            "recent_samples": maintenance_data[:3]
         }
         
         return f"""
@@ -312,7 +321,6 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
 
 @mcp.tool()
 async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
-    """Identifica patrones complejos en el comportamiento del equipo"""
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/{equipment}")
         records = response.json()
@@ -320,9 +328,8 @@ async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
         if len(records) < 10:
             return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
         
-        # Preparar datos para análisis
         pattern_data = []
-        for r in records[:1000]:  # Últimos 50 registros
+        for r in records[:1000]:
             pattern_data.append({
                 "time": r["timestamp"],
                 "temp": r["sensor_data"]["temperature"],
@@ -332,7 +339,7 @@ async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
                 "product_type": r["production_metrics"]["product_type"]
             })
         
-        # Resumen estadístico
+        rules = records[0]["contextual_info"]["compliance_rules"]
         stats = {
             "temp_range": (min(r["sensor_data"]["temperature"] for r in records), 
                           max(r["sensor_data"]["temperature"] for r in records)),
@@ -340,6 +347,10 @@ async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
             "production_variation": {
                 "min": min(r["production_metrics"]["quantity"] for r in records),
                 "max": max(r["production_metrics"]["quantity"] for r in records)
+            },
+            "compliance_limits": {
+                "temp_limit": rules["temperature_limit"],
+                "pressure_limit": rules["pressure_limit"]
             }
         }
         
@@ -417,15 +428,13 @@ async def search_work_instructions(ctx: Context, product_type: str) -> str:
 
 @mcp.tool()
 async def maintenance_recommendations(ctx: Context, equipment: str) -> str:
-    """Genera recomendaciones de mantenimiento preventivo"""
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/{equipment}")
-        records = response.json()[:10]  # Últimos 10 registros
+        records = response.json()[:10]
         
         if not records:
             return f"No hay datos suficientes para {equipment}"
         
-        # Análisis de tendencias
         temps = [r["sensor_data"]["temperature"] for r in records]
         pressures = [r["sensor_data"]["pressure"] for r in records]
         vibes = [r["sensor_data"]["vibration"] for r in records]
@@ -433,33 +442,36 @@ async def maintenance_recommendations(ctx: Context, equipment: str) -> str:
         
         recommendations = []
         
-        # Evaluar temperatura
         temp_avg = statistics.mean(temps)
         if temp_avg > rules["temperature_limit"] * 0.9:
-            recommendations.append("🔧 Limpieza de sistemas de refrigeración")
+            recommendations.append(f"🔧 Limpieza de sistemas de refrigeración (límite: {rules['temperature_limit']}°C)")
         
-        # Evaluar presión
         pressure_max = max(pressures)
         if pressure_max > rules["pressure_limit"] * 0.85:
-            recommendations.append("🔧 Verificación de válvulas y sellos")
+            recommendations.append(f"🔧 Verificación de válvulas y sellos (límite: {rules['pressure_limit']} psi)")
         
-        # Evaluar vibración
         if statistics.mean(vibes) > 3.0:
             recommendations.append("🔧 Balanceo de componentes rotativos")
         
         if not recommendations:
-            return f"✅ {equipment} no requiere mantenimiento preventivo inmediato"
-        
-        return f"""
-        🛠️ Recomendaciones para {equipment}:
-        Basado en los últimos {len(records)} registros:
-        {chr(10).join(f'- {rec}' for rec in recommendations)}
-        
-        Parámetros actuales:
-        - Temperatura: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
-        - Presión: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
-        - Vibración: {vibes[0]} mm/s
-        """
+            return f"""
+            ✅ {equipment} no requiere mantenimiento preventivo inmediato
+            - Temperatura actual: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
+            - Presión actual: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
+            - Notas operativas: {rules['process_notes']}
+            """
+        else:
+            return f"""
+            🛠️ Recomendaciones para {equipment}:
+            Basado en los últimos {len(records)} registros:
+            {chr(10).join(f'- {rec}' for rec in recommendations)}
+            
+            Parámetros actuales:
+            - Temperatura: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
+            - Presión: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
+            - Vibración: {vibes[0]} mm/s
+            - Notas operativas: {rules['process_notes']}
+            """
 
 if __name__ == "__main__":
     mcp.run()
