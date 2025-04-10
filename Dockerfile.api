@@ -5,7 +5,7 @@ WORKDIR /app
 
 RUN pip install --upgrade pip
 COPY Mes_app/app.py /app
-RUN pip install fastapi uvicorn PyPDF2 python-multipart
+RUN pip install httpx  fastapi uvicorn PyPDF2 python-multipart
 
 EXPOSE 5000
 

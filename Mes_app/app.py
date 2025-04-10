@@ -7,12 +7,19 @@ import sqlite3
 from datetime import datetime
 import json
 from typing import Optional
+import httpx
 
 app = FastAPI()
 
 class ProductionMetrics(BaseModel):
     quantity: int
     product_type: str
+
+class Event(BaseModel):
+    event_type: str  # Ejemplo: "machine_failure", "production_alert"
+    description: str
+    timestamp: datetime
+    equipment: str
 
 # Modelos de datos
 class SensorData(BaseModel):
@@ -98,6 +105,30 @@ async def create_machine_record(record: MachineRecord):
         raise HTTPException(status_code=400, detail="Transaction ID ya existe")
     finally:
         conn.close()
+
+
+@app.post("/events/")
+async def create_event(event: Event):
+    # Conectar al MCP (asumimos que corre en http://mcp:8000)
+    MCP_URL = "http://mcp:8000/process_event"  # Ajusta según tu configuración
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            # Enviar el evento al MCP
+            response = await client.post(
+                MCP_URL,
+                json={
+                    "event_type": event.event_type,
+                    "description": event.description,
+                    "timestamp": event.timestamp.isoformat(),
+                    "equipment": event.equipment
+                }
+            )
+            if response.status_code != 200:
+                raise HTTPException(status_code=500, detail="Error al enviar evento al MCP")
+            return {"message": "Evento enviado al MCP exitosamente"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/machines/")
 async def get_all_machines(limit: int = 100):

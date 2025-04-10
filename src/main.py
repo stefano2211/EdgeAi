@@ -6,14 +6,133 @@ import statistics
 from sentence_transformers import SentenceTransformer, util
 import torch
 import json
+import smtplib
+from email.mime.text import MIMEText
+import os
+import logging
 
 mcp = FastMCP("Industrial Analytics MCP")
 API_URL = "http://api:5000"
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuración de correo y API Key desde variables de entorno
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SUPERVISOR_EMAIL = os.getenv("SUPERVISOR_EMAIL")
+OPENWEBUI_API_KEY = os.getenv("OPENWEBUI_API_KEY")
+API_URL = "http://api:5000"  # Asegúrate de que esto esté definido
+
+@mcp.tool()
+async def process_event(ctx: Context, event_type: str, description: str, timestamp: str, equipment: str) -> str:
+    """Procesa un evento industrial, lo contextualiza y notifica al supervisor."""
+    logger.info(f"Procesando evento: {event_type} - {equipment}")
+    
+    async with httpx.AsyncClient(timeout=120.0) as client:  # Aumentar timeout a 120 segundos
+        logger.info(f"Obteniendo datos de {equipment} desde la API")
+        response = await client.get(f"{API_URL}/machines/{equipment}", params={"limit": 5})
+        if response.status_code != 200:
+            logger.error(f"Error al obtener datos: {response.text}")
+            return f"Error al obtener datos de {equipment}: {response.text}"
+        
+        machine_data = response.json()
+        latest_record = machine_data[0] if machine_data else {}
+        logger.info("Datos de la máquina obtenidos exitosamente")
+        
+        context = {
+            "event": {
+                "event_type": event_type,
+                "description": description,
+                "timestamp": timestamp,
+                "equipment": equipment
+            },
+            "latest_machine_data": {
+                "sensor_data": latest_record.get("sensor_data", {}),
+                "production_metrics": latest_record.get("production_metrics", {}),
+                "timestamp": latest_record.get("timestamp", ""),
+                "operator": latest_record.get("operator", "")
+            }
+        }
+        
+        OPENWEBUI_URL = "http://open-webui:8080/api/chat/completions"
+        logger.info(f"Enviando solicitud a OpenWebUI: {OPENWEBUI_URL}")
+        prompt = f"""
+        Eres un asistente experto en mantenimiento industrial. Procesa el siguiente evento industrial y genera un informe claro y conciso para el supervisor:
+
+        **Evento**: {event_type} - {description}
+        **Equipo**: {equipment}
+        **Timestamp**: {timestamp}
+        **Datos recientes del equipo**: {json.dumps(context['latest_machine_data'], indent=2)}
+
+        **Instrucciones**:
+        1. Analiza el evento y los datos proporcionados.
+        2. Identifica posibles causas del evento.
+        3. Evalúa los impactos potenciales en la producción.
+        4. Sugiere acciones correctivas específicas.
+        5. Redacta un informe en formato narrativo (sin listas de opciones múltiples).
+
+        **Ejemplo de formato esperado**:
+        Informe para el supervisor:
+        El evento "[event_type]" ocurrió en [equipment] el [timestamp]. Según los datos recientes, [análisis de los datos]. Las posibles causas incluyen [causas]. Esto podría impactar [impactos]. Se recomienda [acciones correctivas].
+        """
+        
+        headers = {
+            "Authorization": f"Bearer {OPENWEBUI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "llama3.1:8b",
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        
+        logger.info(f"Enviando payload a OpenWebUI: {json.dumps(payload, indent=2)}")
+        try:
+            response = await client.post(OPENWEBUI_URL, json=payload, headers=headers)
+            logger.info(f"Respuesta de OpenWebUI: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"Error en OpenWebUI: {response.text}")
+                return f"Error al procesar en OpenWebUI (código {response.status_code}): {response.text}"
+            
+            response_json = response.json()
+            logger.info(f"Respuesta completa de OpenWebUI: {json.dumps(response_json, indent=2)}")
+            
+            llm_response = response_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+            logger.info(f"Respuesta del LLM: {llm_response}")
+            
+            if not llm_response:
+                logger.warning("El contenido del LLM está vacío")
+                llm_response = "No se pudo generar un informe debido a un error en el modelo."
+        except httpx.RequestError as e:
+            logger.error(f"Excepción al contactar OpenWebUI: {str(e)}")
+            return f"Error al contactar OpenWebUI: {str(e)}"
+        
+        logger.info("Enviando correo al supervisor")
+        msg = MIMEText(llm_response, "plain", "utf-8")
+        msg["Subject"] = f"Evento Industrial: {event_type} en {equipment}"
+        msg["From"] = SMTP_USER
+        msg["To"] = SUPERVISOR_EMAIL
+        
+        logger.info(f"Contenido del correo: {llm_response}")
+        
+        try:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                server.send_message(msg)
+            logger.info("Correo enviado exitosamente")
+            return f"Evento procesado y enviado al supervisor: {llm_response[:100]}..."
+        except Exception as e:
+            logger.error(f"Error al enviar correo: {str(e)}")
+            return f"Evento procesado pero error al enviar correo: {str(e)}"
 # =============================================
 # HERRAMIENTAS DE MONITOREO EN TIEMPO REAL MESS
 # =============================================
+
 
 @mcp.tool()
 async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str:
