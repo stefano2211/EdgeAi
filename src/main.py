@@ -32,7 +32,8 @@ async def process_event(ctx: Context, event_type: str, description: str, timesta
     """Procesa un evento industrial, lo contextualiza y notifica al supervisor."""
     logger.info(f"Procesando evento: {event_type} - {equipment}")
     
-    async with httpx.AsyncClient(timeout=120.0) as client:  # Aumentar timeout a 120 segundos
+    # Aumentar timeout a 180 segundos
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
         logger.info(f"Obteniendo datos de {equipment} desde la API")
         response = await client.get(f"{API_URL}/machines/{equipment}", params={"limit": 5})
         if response.status_code != 200:
@@ -88,6 +89,7 @@ async def process_event(ctx: Context, event_type: str, description: str, timesta
         payload = {
             "model": "llama3.1:8b",
             "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 500  # Limitar tokens para acelerar respuesta
         }
         
         logger.info(f"Enviando payload a OpenWebUI: {json.dumps(payload, indent=2)}")
@@ -107,9 +109,12 @@ async def process_event(ctx: Context, event_type: str, description: str, timesta
             if not llm_response:
                 logger.warning("El contenido del LLM está vacío")
                 llm_response = "No se pudo generar un informe debido a un error en el modelo."
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout al contactar OpenWebUI después de 180 segundos: {str(e)}")
+            return f"Error: Timeout al contactar OpenWebUI después de 180 segundos: {str(e)}"
         except httpx.RequestError as e:
-            logger.error(f"Excepción al contactar OpenWebUI: {str(e)}")
-            return f"Error al contactar OpenWebUI: {str(e)}"
+            logger.error(f"Error de red al contactar OpenWebUI: {str(e)}")
+            return f"Error de red al contactar OpenWebUI: {str(e)}"
         
         logger.info("Enviando correo al supervisor")
         msg = MIMEText(llm_response, "plain", "utf-8")
