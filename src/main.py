@@ -87,9 +87,8 @@ async def process_event(ctx: Context, event_type: str, description: str, timesta
         }
         
         payload = {
-            "model": "llama3.1:8b",
+            "model": "llama3.2:3b",
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 500  # Limitar tokens para acelerar respuesta
         }
         
         logger.info(f"Enviando payload a OpenWebUI: {json.dumps(payload, indent=2)}")
@@ -151,7 +150,7 @@ async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str
         machines = response.json() if isinstance(response.json(), list) else [response.json()]
         
         report = ["🏭 Estado del Equipamiento:"]
-        for machine in machines[:15]:
+        for machine in machines[:1000]:
             status = (
                 f"\n🔧 {machine['equipment']} ({machine['production_metrics']['product_type']})"
                 f"\n- Operador: {machine['operator']}"
@@ -160,7 +159,7 @@ async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str
                 f"{machine['sensor_data']['pressure']} psi (Límite: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi), "
                 f"{machine['sensor_data']['vibration']} mm/s"
                 f"\n- Última actualización: {machine['timestamp']}"
-                f"\n- Notas de cumplimiento: {machine['contextual_info']['compliance_rules']['process_notes']}"
+                f"\n- Notas de cumplimiento del equipo.Verifica si cumple con estos datos y si no da un aviso: {machine['contextual_info']['compliance_rules']['process_notes']}"
             )
             report.append(status)
         
@@ -189,7 +188,8 @@ async def production_dashboard(ctx: Context) -> str:
         - Equipos activos: {len(active_equipment)}
         - Temperatura promedio: {avg_temp:.1f}°C (Límite típico: {rules['temperature_limit']}°C)
         - Normas de cumplimiento relevantes:
-          - Límite de presión: {rules['pressure_limit']} psi
+          - Límite de presión del equipo.Verifica que cumpla con la precion limite la maquina si no da un alerta: {rules['pressure_limit']} psi
+          - Límite de temperatura del equipo.Verifica que cumpla con la temperatura limite la maquina si no da un alerta: {rules['temperature_limit']} C
           - Certificación de operador: {'Requerida' if rules['operator_certification_required'] else 'No requerida'}
           - Notas de proceso: {rules['process_notes']}
         """
@@ -222,9 +222,9 @@ async def product_analysis(ctx: Context, product_type: str) -> str:
         - Lotes registrados: {len(machines)}
         - Equipos utilizados: {equipment_count}
         - Promedio por lote: {avg_per_batch:.1f} unidades
-        - Temperatura promedio: {avg_temp:.1f}°C (Límite: {rules['temperature_limit']}°C)
+        - Temperatura promedio: {avg_temp:.1f}°C (Límite del equipo.Verifica si sobrepaso la temperatura limite la maquina y si paso da una alerta: {rules['temperature_limit']}°C)
         - Contexto de cumplimiento:
-          - Límite de presión: {rules['pressure_limit']} psi
+          - Límite de presión de la maquina.Si sobrepaso la presion manda una alerta si no no es necesario: {rules['pressure_limit']} psi
           - Notas operativas: {rules['process_notes']}
         """
 
@@ -264,8 +264,8 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
         rules = records[0]["contextual_info"]["compliance_rules"]
         report.append(
             f"\n📜 Contexto operativo:"
-            f"\n- Temperatura máxima permitida: {rules['temperature_limit']}°C"
-            f"\n- Presión máxima permitida: {rules['pressure_limit']} psi"
+            f"\n- Temperatura máxima permitida para la maquina.Manda un aviso si la sobrepasa: {rules['temperature_limit']}°C"
+            f"\n- Presión máxima permitida para la maquina.Manda un aviso si la sobrepasa: {rules['pressure_limit']} psi"
             f"\n- Notas: {rules['process_notes']}"
         )
         
@@ -342,6 +342,7 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
         3. Calcula proyección considerando capacidad actual
         4. Identifica cuellos de botella potenciales
         5. Proporciona rango probable (min-max)
+        6. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
         """
 
 
@@ -390,6 +391,7 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
         2. Factores clave influyentes
         3. Recomendaciones operativas
         4. Señales de alerta temprana
+        5. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
         """
 
 @mcp.tool()
@@ -441,6 +443,7 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
         2. Identifica componentes críticos
         3. Estima probabilidad de fallo
         4. Sugiere acciones preventivas
+        5. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
         """
 
 @mcp.tool()
@@ -497,6 +500,7 @@ async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
         2. Identifica patrones temporales
         3. Detecta anomalías significativas
         4. Sugiere optimizaciones operativas
+        5. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
         """
 
 # =============================================
@@ -580,8 +584,8 @@ async def maintenance_recommendations(ctx: Context, equipment: str) -> str:
         if not recommendations:
             return f"""
             ✅ {equipment} no requiere mantenimiento preventivo inmediato
-            - Temperatura actual: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
-            - Presión actual: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
+            - Temperatura actual: {temps[0]}°C (Límite de la maquina.Mandar alerta si no lo cumple: {rules['temperature_limit']}°C)
+            - Presión actual: {pressures[0]} psi (Límitede la maquina.Mandar alerta si no lo cumple: {rules['pressure_limit']} psi)
             - Notas operativas: {rules['process_notes']}
             """
         else:
@@ -591,8 +595,8 @@ async def maintenance_recommendations(ctx: Context, equipment: str) -> str:
             {chr(10).join(f'- {rec}' for rec in recommendations)}
             
             Parámetros actuales:
-            - Temperatura: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
-            - Presión: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
+            - Temperatura: {temps[0]}°C (Límite de la maquina.Manda un aviso si no lo cumple: {rules['temperature_limit']}°C)
+            - Presión: {pressures[0]} psi (Límite de la maquina.Manda un aviso si no lo cumple: {rules['pressure_limit']} psi)
             - Vibración: {vibes[0]} mm/s
             - Notas operativas: {rules['process_notes']}
             """
