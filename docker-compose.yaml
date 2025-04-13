@@ -19,7 +19,7 @@ services:
       - open-webui-data:/app/backend/data
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
-      - OPENWEBUI_API_KEY=
+      - OPENWEBUI_API_KEY=sk-d7fa4f5ce79e4990bfe9ec512b7c8c1e
     depends_on:
       - ollama 
     restart: unless-stopped
@@ -50,10 +50,10 @@ services:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
-      - OPENWEBUI_API_KEY=
-      - SMTP_USER=
-      - SMTP_PASSWORD=
-      - SUPERVISOR_EMAIL=
+      - OPENWEBUI_API_KEY=sk-d7fa4f5ce79e4990bfe9ec512b7c8c1e
+      - SMTP_USER=stefano.andres2004@gmail.com
+      - SMTP_PASSWORD=ebzi svux fakh gekx
+      - SUPERVISOR_EMAIL=stefano.andres04@gmail.com
     depends_on:
       - api
       - open-webui
