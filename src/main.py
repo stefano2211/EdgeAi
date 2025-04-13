@@ -150,16 +150,17 @@ async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str
         machines = response.json() if isinstance(response.json(), list) else [response.json()]
         
         report = ["🏭 Estado del Equipamiento:"]
-        for machine in machines[:1000]:
+        for machine in machines:
             status = (
                 f"\n🔧 {machine['equipment']} ({machine['production_metrics']['product_type']})"
                 f"\n- Operador: {machine['operator']}"
                 f"\n- Producción: {machine['production_metrics']['quantity']} unidades"
-                f"\n- Sensores: {machine['sensor_data']['temperature']}°C (Límite: {machine['contextual_info']['compliance_rules']['temperature_limit']}°C), "
-                f"{machine['sensor_data']['pressure']} psi (Límite: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi), "
+                f"\n- Sensores: {machine['sensor_data']['temperature']}°C (Límite temperatura de la maquina: {machine['contextual_info']['compliance_rules']['temperature_limit']}°C), "
+                f"{machine['sensor_data']['pressure']} psi (Límite de precion de la maquina: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi), "
                 f"{machine['sensor_data']['vibration']} mm/s"
                 f"\n- Última actualización: {machine['timestamp']}"
                 f"\n- Notas de cumplimiento del equipo.Verifica si cumple con estos datos y si no da un aviso: {machine['contextual_info']['compliance_rules']['process_notes']}"
+                f"\n- Qiero que generes una alerta y que le avisese al usuario que tiene que tomar medidas si la temperatura limite supera a la temperatura de la maquina o si la precion supera a la precion limite o si ambas estan por encima de los limites"
             )
             report.append(status)
         
@@ -192,6 +193,7 @@ async def production_dashboard(ctx: Context) -> str:
           - Límite de temperatura del equipo.Verifica que cumpla con la temperatura limite la maquina si no da un alerta: {rules['temperature_limit']} C
           - Certificación de operador: {'Requerida' if rules['operator_certification_required'] else 'No requerida'}
           - Notas de proceso: {rules['process_notes']}
+          - Manda una alerta si la temperatura o la presion o ambas supera a los limites para que el usuario tome medidas
         """
 
 # =============================================
@@ -226,6 +228,7 @@ async def product_analysis(ctx: Context, product_type: str) -> str:
         - Contexto de cumplimiento:
           - Límite de presión de la maquina.Si sobrepaso la presion manda una alerta si no no es necesario: {rules['pressure_limit']} psi
           - Notas operativas: {rules['process_notes']}
+          - Manda una alerta si la temperatura o la presion o ambas supera a los limites para que el usuario tome medidas
         """
 
 @mcp.tool()
@@ -267,6 +270,7 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
             f"\n- Temperatura máxima permitida para la maquina.Manda un aviso si la sobrepasa: {rules['temperature_limit']}°C"
             f"\n- Presión máxima permitida para la maquina.Manda un aviso si la sobrepasa: {rules['pressure_limit']} psi"
             f"\n- Notas: {rules['process_notes']}"
+            f"\n- Manda una alerta si la temperatura o la presion o ambas supera a los limites para que el usuario tome medidas"
         )
         
         return "\n".join(report)
@@ -276,7 +280,8 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
 # =============================================
 
 @mcp.tool()
-async def predict_production(ctx: Context, product_type: str, hours: int ) -> str:
+async def predict_production(ctx: Context, product_type: str, hours: int) -> str:
+    """Predicción de producción usando todos los datos disponibles"""
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/")
         relevant_records = [
@@ -284,13 +289,14 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
             if r["production_metrics"]["product_type"].lower() == product_type.lower()
         ]
         
-        if len(relevant_records) < 5:
-            return f"Insuficientes datos para {product_type} (mínimo 5 registros)"
+        if not relevant_records:
+            return f"No hay datos para el producto {product_type}"
         
+        # Procesar todos los registros sin límite
         production_data = []
         equipment_stats = {}
         
-        for r in relevant_records[:1000]:
+        for r in relevant_records:
             record = {
                 "time": r["timestamp"],
                 "equipment": r["equipment"],
@@ -298,7 +304,8 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
                 "operator": r["operator"],
                 "conditions": {
                     "temp": r["sensor_data"]["temperature"],
-                    "pressure": r["sensor_data"]["pressure"]
+                    "pressure": r["sensor_data"]["pressure"],
+                    "vibration": r["sensor_data"]["vibration"]
                 }
             }
             production_data.append(record)
@@ -306,43 +313,42 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
                 equipment_stats[r["equipment"]] = []
             equipment_stats[r["equipment"]].append(r["production_metrics"]["quantity"])
         
-        total_recent = sum(r["production_metrics"]["quantity"] for r in relevant_records[:24])
-        avg_per_hour = total_recent / 24 if len(relevant_records) >= 24 else total_recent / len(relevant_records)
-        rules = relevant_records[0]["contextual_info"]["compliance_rules"]
-        
-        analysis_context = {
+        # Preparar análisis completo
+        analysis = {
             "product_type": product_type,
-            "forecast_hours": hours,
-            "recent_production": total_recent,
-            "avg_hourly_rate": round(avg_per_hour, 2),
-            "equipment_count": len(equipment_stats),
-            "top_performers": {
-                eq: max(qty) 
-                for eq, qty in list(equipment_stats.items())[:3]
+            "total_records": len(relevant_records),
+            "equipment_used": list(equipment_stats.keys()),
+            "time_range": {
+                "first": min(r["timestamp"] for r in relevant_records),
+                "last": max(r["timestamp"] for r in relevant_records)
             },
-            "sample_data": production_data[:3],
-            "compliance_rules": {
-                "temperature_limit": rules["temperature_limit"],
-                "pressure_limit": rules["pressure_limit"],
-                "process_notes": rules["process_notes"]
+            "production_stats": {
+                "total": sum(r["production_metrics"]["quantity"] for r in relevant_records),
+                "avg": statistics.mean(r["production_metrics"]["quantity"] for r in relevant_records),
+                "max": max(r["production_metrics"]["quantity"] for r in relevant_records),
+                "min": min(r["production_metrics"]["quantity"] for r in relevant_records)
             }
         }
         
         return f"""
-        📈 Datos para predicción de producción de {product_type} (próximas {hours} horas):
+        🔍 Análisis Predictivo Completo para {product_type}:
         
-        **Contexto de análisis:**
-        ```json
-        {json.dumps(analysis_context, indent=2)}
-        ```
+        **Datos de Entrada:**
+        - Registros totales: {analysis['total_records']}
+        - Equipos involucrados: {', '.join(analysis['equipment_used'])}
+        - Rango temporal: {analysis['time_range']['first']} a {analysis['time_range']['last']}
+        
+        **Estadísticas de Producción:**
+        - Total: {analysis['production_stats']['total']} unidades
+        - Promedio: {analysis['production_stats']['avg']:.1f} unidades/registro
+        - Máximo: {analysis['production_stats']['max']} unidades
+        - Mínimo: {analysis['production_stats']['min']} unidades
         
         **Instrucciones para el LLM:**
-        1. Analiza patrones de producción por equipo
-        2. Considera variaciones por turno/temporalidad
-        3. Calcula proyección considerando capacidad actual
-        4. Identifica cuellos de botella potenciales
-        5. Proporciona rango probable (min-max)
-        6. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
+        Realizar predicción para las próximas {hours} horas considerando:
+        1. Todos los registros históricos disponibles
+        2. Variación entre equipos
+        3. Patrones temporales completos
         """
 
 
@@ -356,7 +362,7 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
             return f"Insuficientes datos para {equipment} (mínimo 5 registros)"
         
         temp_data = []
-        for r in records[:1000]:
+        for r in records:
             temp_data.append({
                 "time": r["timestamp"],
                 "temperature": r["sensor_data"]["temperature"],
@@ -370,7 +376,7 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
             "equipment": equipment,
             "timeframe_hours": hours,
             "temperature_limit": rules["temperature_limit"],
-            "data_samples": temp_data[:10],
+            "data_samples": temp_data,
             "compliance_rules": {
                 "pressure_limit": rules["pressure_limit"],
                 "process_notes": rules["process_notes"]
@@ -404,7 +410,7 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
             return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
         
         maintenance_data = []
-        for r in records[:1000]:
+        for r in records:
             maintenance_data.append({
                 "time": r["timestamp"],
                 "sensors": {
@@ -424,10 +430,10 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
             "forecast_hours": horizon_hours,
             "limits": rules,
             "key_metrics": {
-                "avg_temp": statistics.mean(r["sensor_data"]["temperature"] for r in records[:24]),
-                "max_vibration": max(r["sensor_data"]["vibration"] for r in records[:24])
+                "avg_temp": statistics.mean(r["sensor_data"]["temperature"] for r in records),
+                "max_vibration": max(r["sensor_data"]["vibration"] for r in records)
             },
-            "recent_samples": maintenance_data[:3]
+            "recent_samples": maintenance_data
         }
         
         return f"""
@@ -456,7 +462,7 @@ async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
             return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
         
         pattern_data = []
-        for r in records[:1000]:
+        for r in records:
             pattern_data.append({
                 "time": r["timestamp"],
                 "temp": r["sensor_data"]["temperature"],
@@ -491,7 +497,7 @@ async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
         
         **Muestras de datos temporales:**
         ```json
-        {json.dumps(pattern_data[:3], indent=2)}
+        {json.dumps(pattern_data, indent=2)}
         ```
         [Mostrando 3 de {len(pattern_data)} registros disponibles]
         
@@ -508,47 +514,63 @@ async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
 # =============================================
 
 @mcp.tool()
-async def search_work_instructions(ctx: Context, product_type: str) -> str:
-    """Busca instrucciones de trabajo para un tipo de producto"""
+async def get_pdf_data(request: str, ctx: Context) -> str:
+    """Realiza una búsqueda semántica entre los PDFs para resolver la solicitud del usuario"""
+    if not request:
+        return "Por favor, especifica qué información deseas extraer o analizar de los PDFs."
+    
     async with httpx.AsyncClient() as client:
-        # Obtener documentos relevantes
+        # Obtener todos los PDFs desde la API
         response = await client.get(f"{API_URL}/pdfs/")
+        if response.status_code != 200:
+            return f"Error al obtener PDFs: {response.text}"
+        
         pdfs = response.json()
-        
         if not pdfs:
-            return "No hay documentos disponibles"
+            return "No hay PDFs almacenados en la base de datos."
         
-        # Búsqueda semántica
-        query = f"Instrucciones de trabajo para producto {product_type}"
-        query_embedding = model.encode(query, convert_to_tensor=True)
+        # Generar embedding para la solicitud del usuario
+        request_embedding = model.encode(request, convert_to_tensor=True)
         
-        results = []
+        # Calcular embeddings y similitudes para cada PDF
+        pdfs_with_scores = []
         for pdf in pdfs:
-            content = pdf["content"][:1000]  # Limitar tamaño para eficiencia
-            doc_embedding = model.encode(content, convert_to_tensor=True)
-            similarity = util.pytorch_cos_sim(query_embedding, doc_embedding).item()
-            
-            if similarity > 0.25:  # Umbral bajo para capturar más resultados
-                results.append({
-                    "filename": pdf["filename"],
-                    "similarity": similarity,
-                    "excerpt": content[:200] + "..."
-                })
+            content = pdf["content"]
+            if len(content) > 1000:  # Limitar para optimizar
+                content = content[:1000]
+            pdf_embedding = model.encode(content, convert_to_tensor=True)
+            similarity = util.pytorch_cos_sim(request_embedding, pdf_embedding).item()
+            if similarity > 0.3:  # Umbral de relevancia
+                pdfs_with_scores.append((pdf["filename"], content, similarity))
         
-        if not results:
-            return f"No se encontraron instrucciones para {product_type}"
+        if not pdfs_with_scores:
+            return f"No se encontraron PDFs relevantes para la solicitud: '{request}'."
         
-        # Ordenar y formatear resultados
-        results.sort(key=lambda x: x["similarity"], reverse=True)
+        # Ordenar por similitud (mayor primero)
+        pdfs_with_scores.sort(key=lambda x: x[2], reverse=True)
         
-        report = [f"📄 Instrucciones para {product_type}:"]
-        for doc in results[:3]:  # Top 3 resultados
-            report.append(
-                f"\n📑 {doc['filename']} (Relevancia: {doc['similarity']:.0%})"
-                f"\n{doc['excerpt']}"
-            )
+        # Limitar a los 3 más relevantes
+        selected_pdfs = pdfs_with_scores[:min(3, len(pdfs_with_scores))]
         
-        return "\n".join(report)
+        data_summary = ""
+        for filename, content, similarity in selected_pdfs:
+            data_summary += f"""
+            Contenido del PDF '{filename}':
+            {content}
+            (Similitud: {similarity:.2f})
+            """
+        
+        instruction = f"""
+        Basado en el siguiente contenido extraído de los PDFs más relevantes:
+        {data_summary}
+        
+        Por favor, realiza el siguiente análisis o responde a la solicitud del usuario: '{request}'.
+        Extrae la información relevante del contenido y proporciona una respuesta detallada.
+        Si el contenido no contiene los datos necesarios para responder, indícalo y sugiere cómo proceder.
+        """
+        return instruction
+
+
 
 # =============================================
 # HERRAMIENTAS DE MANTENIMIENTO
@@ -558,7 +580,7 @@ async def search_work_instructions(ctx: Context, product_type: str) -> str:
 async def maintenance_recommendations(ctx: Context, equipment: str) -> str:
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/{equipment}")
-        records = response.json()[:10]
+        records = response.json()
         
         if not records:
             return f"No hay datos suficientes para {equipment}"
