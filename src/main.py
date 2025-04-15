@@ -155,12 +155,15 @@ async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str
                 f"\n🔧 {machine['equipment']} ({machine['production_metrics']['product_type']})"
                 f"\n- Operador: {machine['operator']}"
                 f"\n- Producción: {machine['production_metrics']['quantity']} unidades"
-                f"\n- Sensores: {machine['sensor_data']['temperature']}°C (Límite temperatura de la maquina: {machine['contextual_info']['compliance_rules']['temperature_limit']}°C), "
-                f"{machine['sensor_data']['pressure']} psi (Límite de precion de la maquina: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi), "
+                f"\n- Sensores: {machine['sensor_data']['temperature']}°C (Límite: {machine['contextual_info']['compliance_rules']['temperature_limit']}°C), "
+                f"{machine['sensor_data']['pressure']} psi (Límite: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi), "
                 f"{machine['sensor_data']['vibration']} mm/s"
                 f"\n- Última actualización: {machine['timestamp']}"
-                f"\n- Notas de cumplimiento del equipo.Verifica si cumple con estos datos y si no da un aviso: {machine['contextual_info']['compliance_rules']['process_notes']}"
-                f"\n- Qiero que generes una alerta y que le avisese al usuario que tiene que tomar medidas si la temperatura limite supera a la temperatura de la maquina o si la precion supera a la precion limite o si ambas estan por encima de los limites"
+                f"\n- Notas de cumplimiento: {machine['contextual_info']['compliance_rules']['process_notes']}"
+                f"\n\n💡 CONTEXTO PARA EL LLM: Los valores de sensores deben compararse con los límites especificados. "
+                f"Generar alertas si temperatura > {machine['contextual_info']['compliance_rules']['temperature_limit']}°C "
+                f"o presión > {machine['contextual_info']['compliance_rules']['pressure_limit']} psi. "
+                f"Considerar notas operativas: {machine['contextual_info']['compliance_rules']['process_notes']}"
             )
             report.append(status)
         
@@ -180,7 +183,6 @@ async def production_dashboard(ctx: Context) -> str:
         active_equipment = {m["equipment"] for m in machines}
         avg_temp = statistics.mean(m["sensor_data"]["temperature"] for m in machines)
         
-        # Usar el primer equipo como referencia para compliance_rules
         rules = machines[0]["contextual_info"]["compliance_rules"]
         return f"""
         📊 Dashboard de Producción:
@@ -189,11 +191,15 @@ async def production_dashboard(ctx: Context) -> str:
         - Equipos activos: {len(active_equipment)}
         - Temperatura promedio: {avg_temp:.1f}°C (Límite típico: {rules['temperature_limit']}°C)
         - Normas de cumplimiento relevantes:
-          - Límite de presión del equipo.Verifica que cumpla con la precion limite la maquina si no da un alerta: {rules['pressure_limit']} psi
-          - Límite de temperatura del equipo.Verifica que cumpla con la temperatura limite la maquina si no da un alerta: {rules['temperature_limit']} C
+          - Límite de presión: {rules['pressure_limit']} psi
+          - Límite de temperatura: {rules['temperature_limit']}°C
           - Certificación de operador: {'Requerida' if rules['operator_certification_required'] else 'No requerida'}
           - Notas de proceso: {rules['process_notes']}
-          - Manda una alerta si la temperatura o la presion o ambas supera a los limites para que el usuario tome medidas
+        
+        💡 CONTEXTO PARA EL LLM: Analizar relación entre promedios y límites operativos. 
+        Alertar si temperatura promedio está dentro del 10% del límite ({rules['temperature_limit']}°C) 
+        o presión promedio dentro del 10% del límite ({rules['pressure_limit']} psi). 
+        Considerar contexto de certificación y notas operativas.
         """
 
 # =============================================
@@ -224,11 +230,14 @@ async def product_analysis(ctx: Context, product_type: str) -> str:
         - Lotes registrados: {len(machines)}
         - Equipos utilizados: {equipment_count}
         - Promedio por lote: {avg_per_batch:.1f} unidades
-        - Temperatura promedio: {avg_temp:.1f}°C (Límite del equipo.Verifica si sobrepaso la temperatura limite la maquina y si paso da una alerta: {rules['temperature_limit']}°C)
+        - Temperatura promedio: {avg_temp:.1f}°C (Límite: {rules['temperature_limit']}°C)
         - Contexto de cumplimiento:
-          - Límite de presión de la maquina.Si sobrepaso la presion manda una alerta si no no es necesario: {rules['pressure_limit']} psi
+          - Límite de presión: {rules['pressure_limit']} psi
           - Notas operativas: {rules['process_notes']}
-          - Manda una alerta si la temperatura o la presion o ambas supera a los limites para que el usuario tome medidas
+        
+        💡 CONTEXTO PARA EL LLM: Evaluar si la producción de {product_type} opera dentro de parámetros seguros. 
+        Alertar si temperatura promedio ({avg_temp:.1f}°C) se acerca al límite ({rules['temperature_limit']}°C) 
+        o si hay variaciones significativas entre equipos. Considerar notas operativas en el análisis.
         """
 
 @mcp.tool()
@@ -263,14 +272,16 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
                 f"\n- Promedio: {stats['total']/stats['count']:.1f} unidades/lote"
                 f"\n- Última producción: {stats['last_production'][:10]}"
             )
-        # Integrar compliance_rules
+        
         rules = records[0]["contextual_info"]["compliance_rules"]
         report.append(
             f"\n📜 Contexto operativo:"
-            f"\n- Temperatura máxima permitida para la maquina.Manda un aviso si la sobrepasa: {rules['temperature_limit']}°C"
-            f"\n- Presión máxima permitida para la maquina.Manda un aviso si la sobrepasa: {rules['pressure_limit']} psi"
+            f"\n- Temperatura máxima permitida: {rules['temperature_limit']}°C"
+            f"\n- Presión máxima permitida: {rules['pressure_limit']} psi"
             f"\n- Notas: {rules['process_notes']}"
-            f"\n- Manda una alerta si la temperatura o la presion o ambas supera a los limites para que el usuario tome medidas"
+            f"\n\n💡 CONTEXTO PARA EL LLM: Analizar productividad en relación con límites operativos. "
+            f"Alertar si alta productividad coincide con valores cercanos a límites de temperatura/presión. "
+            f"Considerar que operador puede estar en entrenamiento: {rules['process_notes']}"
         )
         
         return "\n".join(report)
@@ -280,8 +291,7 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
 # =============================================
 
 @mcp.tool()
-async def predict_production(ctx: Context, product_type: str, hours: int) -> str:
-    """Predicción de producción usando todos los datos disponibles"""
+async def predict_production(ctx: Context, product_type: str, hours: int ) -> str:
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/")
         relevant_records = [
@@ -289,10 +299,9 @@ async def predict_production(ctx: Context, product_type: str, hours: int) -> str
             if r["production_metrics"]["product_type"].lower() == product_type.lower()
         ]
         
-        if not relevant_records:
-            return f"No hay datos para el producto {product_type}"
+        if len(relevant_records) < 5:
+            return f"Insuficientes datos para {product_type} (mínimo 5 registros)"
         
-        # Procesar todos los registros sin límite
         production_data = []
         equipment_stats = {}
         
@@ -304,8 +313,7 @@ async def predict_production(ctx: Context, product_type: str, hours: int) -> str
                 "operator": r["operator"],
                 "conditions": {
                     "temp": r["sensor_data"]["temperature"],
-                    "pressure": r["sensor_data"]["pressure"],
-                    "vibration": r["sensor_data"]["vibration"]
+                    "pressure": r["sensor_data"]["pressure"]
                 }
             }
             production_data.append(record)
@@ -313,42 +321,43 @@ async def predict_production(ctx: Context, product_type: str, hours: int) -> str
                 equipment_stats[r["equipment"]] = []
             equipment_stats[r["equipment"]].append(r["production_metrics"]["quantity"])
         
-        # Preparar análisis completo
-        analysis = {
+        total_recent = sum(r["production_metrics"]["quantity"] for r in relevant_records[:24])
+        avg_per_hour = total_recent / 24 if len(relevant_records) >= 24 else total_recent / len(relevant_records)
+        rules = relevant_records[0]["contextual_info"]["compliance_rules"]
+        
+        analysis_context = {
             "product_type": product_type,
-            "total_records": len(relevant_records),
-            "equipment_used": list(equipment_stats.keys()),
-            "time_range": {
-                "first": min(r["timestamp"] for r in relevant_records),
-                "last": max(r["timestamp"] for r in relevant_records)
+            "forecast_hours": hours,
+            "recent_production": total_recent,
+            "avg_hourly_rate": round(avg_per_hour, 2),
+            "equipment_count": len(equipment_stats),
+            "top_performers": {
+                eq: max(qty) 
+                for eq, qty in list(equipment_stats.items())[:3]
             },
-            "production_stats": {
-                "total": sum(r["production_metrics"]["quantity"] for r in relevant_records),
-                "avg": statistics.mean(r["production_metrics"]["quantity"] for r in relevant_records),
-                "max": max(r["production_metrics"]["quantity"] for r in relevant_records),
-                "min": min(r["production_metrics"]["quantity"] for r in relevant_records)
+            "sample_data": production_data,
+            "compliance_rules": {
+                "temperature_limit": rules["temperature_limit"],
+                "pressure_limit": rules["pressure_limit"],
+                "process_notes": rules["process_notes"]
             }
         }
         
         return f"""
-        🔍 Análisis Predictivo Completo para {product_type}:
+        📈 Datos para predicción de producción de {product_type} (próximas {hours} horas):
         
-        **Datos de Entrada:**
-        - Registros totales: {analysis['total_records']}
-        - Equipos involucrados: {', '.join(analysis['equipment_used'])}
-        - Rango temporal: {analysis['time_range']['first']} a {analysis['time_range']['last']}
-        
-        **Estadísticas de Producción:**
-        - Total: {analysis['production_stats']['total']} unidades
-        - Promedio: {analysis['production_stats']['avg']:.1f} unidades/registro
-        - Máximo: {analysis['production_stats']['max']} unidades
-        - Mínimo: {analysis['production_stats']['min']} unidades
+        **Contexto de análisis:**
+        ```json
+        {json.dumps(analysis_context, indent=2)}
+        ```
         
         **Instrucciones para el LLM:**
-        Realizar predicción para las próximas {hours} horas considerando:
-        1. Todos los registros históricos disponibles
-        2. Variación entre equipos
-        3. Patrones temporales completos
+        1. Analiza patrones de producción por equipo
+        2. Considera variaciones por turno/temporalidad
+        3. Calcula proyección considerando capacidad actual
+        4. Identifica cuellos de botella potenciales
+        5. Proporciona rango probable (min-max)
+        6. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
         """
 
 
@@ -430,8 +439,8 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
             "forecast_hours": horizon_hours,
             "limits": rules,
             "key_metrics": {
-                "avg_temp": statistics.mean(r["sensor_data"]["temperature"] for r in records),
-                "max_vibration": max(r["sensor_data"]["vibration"] for r in records)
+                "avg_temp": statistics.mean(r["sensor_data"]["temperature"] for r in records[:24]),
+                "max_vibration": max(r["sensor_data"]["vibration"] for r in records[:24])
             },
             "recent_samples": maintenance_data
         }
@@ -452,6 +461,7 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
         5. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
         """
 
+
 @mcp.tool()
 async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
     async with httpx.AsyncClient() as client:
@@ -461,52 +471,65 @@ async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
         if len(records) < 10:
             return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
         
-        pattern_data = []
-        for r in records:
-            pattern_data.append({
-                "time": r["timestamp"],
-                "temp": r["sensor_data"]["temperature"],
-                "pressure": r["sensor_data"]["pressure"],
-                "vibration": r["sensor_data"]["vibration"],
-                "production": r["production_metrics"]["quantity"],
-                "product_type": r["production_metrics"]["product_type"]
-            })
+        # Calcular estadísticas completas
+        temps = [r["sensor_data"]["temperature"] for r in records]
+        pressures = [r["sensor_data"]["pressure"] for r in records]
+        vibes = [r["sensor_data"]["vibration"] for r in records]
+        productions = [r["production_metrics"]["quantity"] for r in records]
         
         rules = records[0]["contextual_info"]["compliance_rules"]
+        
         stats = {
-            "temp_range": (min(r["sensor_data"]["temperature"] for r in records), 
-                          max(r["sensor_data"]["temperature"] for r in records)),
-            "pressure_avg": statistics.mean(r["sensor_data"]["pressure"] for r in records),
-            "production_variation": {
-                "min": min(r["production_metrics"]["quantity"] for r in records),
-                "max": max(r["production_metrics"]["quantity"] for r in records)
+            "temperature": {
+                "min": min(temps),
+                "max": max(temps),
+                "avg": statistics.mean(temps),
+                "limit": rules["temperature_limit"],
+                "over_limit_count": sum(1 for t in temps if t > rules["temperature_limit"])
             },
-            "compliance_limits": {
-                "temp_limit": rules["temperature_limit"],
-                "pressure_limit": rules["pressure_limit"]
+            "pressure": {
+                "min": min(pressures),
+                "max": max(pressures),
+                "avg": statistics.mean(pressures),
+                "limit": rules["pressure_limit"],
+                "over_limit_count": sum(1 for p in pressures if p > rules["pressure_limit"])
+            },
+            "vibration": {
+                "min": min(vibes),
+                "max": max(vibes),
+                "avg": statistics.mean(vibes)
+            },
+            "production": {
+                "min": min(productions),
+                "max": max(productions),
+                "avg": statistics.mean(productions)
+            },
+            "time_range": {
+                "start": min(r["timestamp"] for r in records),
+                "end": max(r["timestamp"] for r in records)
             }
         }
         
         return f"""
-        🔎 Datos para análisis de patrones en {equipment}:
+        🔍 Análisis de Patrones en {equipment}:
         
-        **Resumen estadístico:**
+        **ESTADÍSTICAS COMPLETAS:**
         ```json
         {json.dumps(stats, indent=2)}
         ```
         
-        **Muestras de datos temporales:**
-        ```json
-        {json.dumps(pattern_data, indent=2)}
-        ```
-        [Mostrando 3 de {len(pattern_data)} registros disponibles]
+        **LÍMITES OPERATIVOS:**
+        - Temperatura máxima permitida: {rules['temperature_limit']}°C
+        - Presión máxima permitida: {rules['pressure_limit']} psi
+        - Notas operativas: {rules['process_notes']}
         
-        **Instrucciones para el LLM:**
-        1. Analiza correlaciones entre variables
-        2. Identifica patrones temporales
-        3. Detecta anomalías significativas
-        4. Sugiere optimizaciones operativas
-        5. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
+        **INSTRUCCIONES PARA EL LLM:**
+        1. Analizar las estadísticas proporcionadas
+        2. Identificar correlaciones entre variables
+        3. Detectar patrones temporales
+        4. Evaluar violaciones a límites operativos
+        5. Proponer recomendaciones basadas en los datos
+        6. Considerar el contexto operacional proporcionado
         """
 
 # =============================================
@@ -606,21 +629,28 @@ async def maintenance_recommendations(ctx: Context, equipment: str) -> str:
         if not recommendations:
             return f"""
             ✅ {equipment} no requiere mantenimiento preventivo inmediato
-            - Temperatura actual: {temps[0]}°C (Límite de la maquina.Mandar alerta si no lo cumple: {rules['temperature_limit']}°C)
-            - Presión actual: {pressures[0]} psi (Límitede la maquina.Mandar alerta si no lo cumple: {rules['pressure_limit']} psi)
+            - Temperatura actual: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
+            - Presión actual: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
             - Notas operativas: {rules['process_notes']}
+            
+            💡 CONTEXTO PARA EL LLM: Equipo opera dentro de parámetros normales. 
+            Monitorear si valores se acercan a límites ({rules['temperature_limit']}°C/{rules['pressure_limit']} psi).
+            Considerar: {rules['process_notes']}
             """
         else:
             return f"""
             🛠️ Recomendaciones para {equipment}:
-            Basado en los últimos {len(records)} registros:
+            Basado en {len(records)} registros:
             {chr(10).join(f'- {rec}' for rec in recommendations)}
             
-            Parámetros actuales:
-            - Temperatura: {temps[0]}°C (Límite de la maquina.Manda un aviso si no lo cumple: {rules['temperature_limit']}°C)
-            - Presión: {pressures[0]} psi (Límite de la maquina.Manda un aviso si no lo cumple: {rules['pressure_limit']} psi)
+            **Límites Operativos:**
+            - Temperatura: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
+            - Presión: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
             - Vibración: {vibes[0]} mm/s
-            - Notas operativas: {rules['process_notes']}
+            - Notas: {rules['process_notes']}
+            
+            💡 CONTEXTO PARA EL LLM: Priorizar recomendaciones cerca de límites. 
+            Considerar impacto en producción y notas operativas.
             """
 
 if __name__ == "__main__":
