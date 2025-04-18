@@ -131,14 +131,15 @@ async def create_event(event: Event):
             raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/machines/")
-async def get_all_machines(limit: int = 100):
+async def get_all_machines():
+    """Obtiene TODOS los registros de máquinas sin límite"""
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
     cursor.execute("""
         SELECT transaction_id, work_order_id, timestamp, equipment,
                operator, sensor_data, contextual_info, production_metrics
-        FROM machines ORDER BY timestamp DESC LIMIT ?
-    """, (limit,))
+        FROM machines ORDER BY timestamp DESC
+    """)  # Eliminamos el LIMIT
     
     machines = []
     for row in cursor.fetchall():
@@ -150,13 +151,14 @@ async def get_all_machines(limit: int = 100):
             "operator": row[4],
             "sensor_data": json.loads(row[5]),
             "contextual_info": json.loads(row[6]),
-            "production_metrics": json.loads(row[7])  # Nuevo campo
+            "production_metrics": json.loads(row[7])
         })
     conn.close()
     return machines
 
 @app.get("/machines/{equipment}")
-async def get_machine_records(equipment: str, limit: int = 50):
+async def get_machine_records(equipment: str):
+    """Obtiene TODOS los registros de un equipo específico sin límite"""
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -164,9 +166,8 @@ async def get_machine_records(equipment: str, limit: int = 50):
                sensor_data, contextual_info, production_metrics
         FROM machines 
         WHERE equipment = ? 
-        ORDER BY timestamp DESC 
-        LIMIT ?
-    """, (equipment, limit))
+        ORDER BY timestamp DESC
+    """, (equipment,))  # Eliminamos el LIMIT
     
     records = []
     for row in cursor.fetchall():
@@ -177,7 +178,7 @@ async def get_machine_records(equipment: str, limit: int = 50):
             "operator": row[3],
             "sensor_data": json.loads(row[4]),
             "contextual_info": json.loads(row[5]),
-            "production_metrics": json.loads(row[6])  # Nuevo campo
+            "production_metrics": json.loads(row[6])
         })
     conn.close()
     

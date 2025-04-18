@@ -291,7 +291,7 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
 # =============================================
 
 @mcp.tool()
-async def predict_production(ctx: Context, product_type: str, hours: int ) -> str:
+async def predict_production(ctx: Context, product_type: str, hours: int) -> str:
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{API_URL}/machines/")
         relevant_records = [
@@ -302,6 +302,7 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
         if len(relevant_records) < 5:
             return f"Insuficientes datos para {product_type} (mínimo 5 registros)"
         
+        # Procesamiento original (sin cambios)
         production_data = []
         equipment_stats = {}
         
@@ -321,45 +322,35 @@ async def predict_production(ctx: Context, product_type: str, hours: int ) -> st
                 equipment_stats[r["equipment"]] = []
             equipment_stats[r["equipment"]].append(r["production_metrics"]["quantity"])
         
-        total_recent = sum(r["production_metrics"]["quantity"] for r in relevant_records[:24])
-        avg_per_hour = total_recent / 24 if len(relevant_records) >= 24 else total_recent / len(relevant_records)
         rules = relevant_records[0]["contextual_info"]["compliance_rules"]
         
-        analysis_context = {
-            "product_type": product_type,
-            "forecast_hours": hours,
-            "recent_production": total_recent,
-            "avg_hourly_rate": round(avg_per_hour, 2),
-            "equipment_count": len(equipment_stats),
-            "top_performers": {
-                eq: max(qty) 
-                for eq, qty in list(equipment_stats.items())[:3]
-            },
-            "sample_data": production_data,
-            "compliance_rules": {
-                "temperature_limit": rules["temperature_limit"],
-                "pressure_limit": rules["pressure_limit"],
-                "process_notes": rules["process_notes"]
-            }
-        }
+        # Formateo completo de TODOS los registros
+        all_records = "\n".join(
+            f"📅 {d['time']} | 🏭 {d['equipment']} | 👷 {d['operator']} | "
+            f"📦 {d['quantity']} unidades | 🌡️ {d['conditions']['temp']}°C | "
+            f"🌀 {d['conditions']['pressure']} psi"
+            for d in production_data
+        )
         
         return f"""
-        📈 Datos para predicción de producción de {product_type} (próximas {hours} horas):
+        📈 PREDICCIÓN DE PRODUCCIÓN - {product_type.upper()}
+        ⏳ Período: Próximas {hours} horas
+        📊 Registros completos ({len(relevant_records)}):
         
-        **Contexto de análisis:**
-        ```json
-        {json.dumps(analysis_context, indent=2)}
-        ```
+        {all_records}
         
-        **Instrucciones para el LLM:**
-        1. Analiza patrones de producción por equipo
-        2. Considera variaciones por turno/temporalidad
-        3. Calcula proyección considerando capacidad actual
-        4. Identifica cuellos de botella potenciales
-        5. Proporciona rango probable (min-max)
-        6. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
+        ⚠️ LÍMITES OPERATIVOS:
+        • Temperatura máxima: {rules['temperature_limit']}°C
+        • Presión máxima: {rules['pressure_limit']} psi
+        • Notas: {rules['process_notes']}
+        
+        💡 INSTRUCCIONES PARA EL LLM:
+        Analizar todos los registros mostrados y predecir producción considerando:
+        1. Patrones históricos completos
+        2. Límites operativos
+        3. Variación entre equipos
+        4. Contexto operacional
         """
-
 
 @mcp.tool()
 async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
@@ -370,6 +361,7 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
         if len(records) < 5:
             return f"Insuficientes datos para {equipment} (mínimo 5 registros)"
         
+        # Procesamiento original (sin cambios)
         temp_data = []
         for r in records:
             temp_data.append({
@@ -381,32 +373,32 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
             })
         
         rules = records[0]["contextual_info"]["compliance_rules"]
-        analysis_context = {
-            "equipment": equipment,
-            "timeframe_hours": hours,
-            "temperature_limit": rules["temperature_limit"],
-            "data_samples": temp_data,
-            "compliance_rules": {
-                "pressure_limit": rules["pressure_limit"],
-                "process_notes": rules["process_notes"]
-            }
-        }
+        
+        # Formateo completo de TODOS los registros
+        all_readings = "\n".join(
+            f"📅 {d['time']} | 🌡️ {d['temperature']}°C | 🌀 {d['pressure']} psi | "
+            f"📳 {d['vibration']} mm/s | 📦 {d['production']} unidades"
+            for d in temp_data
+        )
         
         return f"""
-        🔍 Datos para predicción de temperatura en {equipment} (próximas {hours} horas):
+        🌡️ PREDICCIÓN DE TEMPERATURA - {equipment.upper()}
+        ⏳ Período: Próximas {hours} horas
+        📊 Registros completos ({len(records)}):
         
-        **Contexto de análisis:**
-        ```json
-        {json.dumps(analysis_context, indent=2)}
-        ```
+        {all_readings}
         
-        **Instrucciones para el LLM:**
-        Analiza los patrones y proporciona:
-        1. Temperatura predicha
-        2. Factores clave influyentes
-        3. Recomendaciones operativas
-        4. Señales de alerta temprana
-        5. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
+        ⚠️ LÍMITES OPERATIVOS:
+        • Temperatura máxima: {rules['temperature_limit']}°C
+        • Presión máxima: {rules['pressure_limit']} psi
+        • Notas: {rules['process_notes']}
+        
+        💡 INSTRUCCIONES PARA EL LLM:
+        Analizar todos los registros mostrados y predecir temperatura considerando:
+        1. Tendencia histórica completa
+        2. Correlación con presión y producción
+        3. Límites operativos
+        4. Patrones de vibración
         """
 
 @mcp.tool()
@@ -418,6 +410,7 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
         if len(records) < 10:
             return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
         
+        # Procesamiento original (sin cambios)
         maintenance_data = []
         for r in records:
             maintenance_data.append({
@@ -434,31 +427,33 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
             })
         
         rules = records[0]["contextual_info"]["compliance_rules"]
-        analysis_context = {
-            "equipment": equipment,
-            "forecast_hours": horizon_hours,
-            "limits": rules,
-            "key_metrics": {
-                "avg_temp": statistics.mean(r["sensor_data"]["temperature"] for r in records[:24]),
-                "max_vibration": max(r["sensor_data"]["vibration"] for r in records[:24])
-            },
-            "recent_samples": maintenance_data
-        }
+        
+        # Formateo completo de TODOS los registros
+        all_maintenance = "\n".join(
+            f"📅 {d['time']} | 🌡️ {d['sensors']['temp']}°C | 🌀 {d['sensors']['pressure']} psi | "
+            f"📳 {d['sensors']['vibration']} mm/s | 📦 {d['production']['quantity']} {d['production']['type']}"
+            for d in maintenance_data
+        )
         
         return f"""
-        🛠️ Datos para predicción de mantenimiento en {equipment} (próximas {horizon_hours} horas):
+        🛠️ PREDICCIÓN DE MANTENIMIENTO - {equipment.upper()}
+        ⏳ Horizonte: Próximas {horizon_hours} horas
+        📊 Registros completos ({len(records)}):
         
-        **Contexto de análisis:**
-        ```json
-        {json.dumps(analysis_context, indent=2)}
-        ```
+        {all_maintenance}
         
-        **Instrucciones para el LLM:**
-        1. Evalúa patrones de desgaste
-        2. Identifica componentes críticos
-        3. Estima probabilidad de fallo
-        4. Sugiere acciones preventivas
-        5. Considera impacto de reglas de cumplimiento y mando un aviso si no las cumple
+        ⚠️ LÍMITES OPERATIVOS:
+        • Temperatura máxima: {rules['temperature_limit']}°C
+        • Presión máxima: {rules['pressure_limit']} psi
+        • Notas: {rules['process_notes']}
+        
+        💡 INSTRUCCIONES PARA EL LLM:
+        Analizar todos los registros mostrados y predecir mantenimiento considerando:
+        1. Patrones completos de desgaste
+        2. Historial de valores de sensores
+        3. Relación con producción
+        4. Límites operativos
+        5. Contexto de operación
         """
 
 
