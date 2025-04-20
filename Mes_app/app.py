@@ -4,9 +4,8 @@ from pydantic import BaseModel
 from datetime import datetime
 import PyPDF2
 import sqlite3
-from datetime import datetime
 import json
-from typing import Optional
+from typing import Optional, List
 import httpx
 
 app = FastAPI()
@@ -131,15 +130,41 @@ async def create_event(event: Event):
             raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/machines/")
-async def get_all_machines():
-    """Obtiene TODOS los registros de máquinas sin límite"""
+async def get_all_machines(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+):
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
-    cursor.execute("""
+    
+    base_query = """
         SELECT transaction_id, work_order_id, timestamp, equipment,
                operator, sensor_data, contextual_info, production_metrics
-        FROM machines ORDER BY timestamp DESC
-    """)  # Eliminamos el LIMIT
+        FROM machines
+    """
+    
+    conditions = []
+    params = []
+    
+    if specific_date:
+        conditions.append("DATE(timestamp) = ?")
+        params.append(specific_date)
+    else:
+        if start_date:
+            conditions.append("timestamp >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("timestamp <= ?")
+            params.append(end_date)
+    
+    query = base_query
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    
+    query += " ORDER BY timestamp DESC"
+    
+    cursor.execute(query, params)
     
     machines = []
     for row in cursor.fetchall():
@@ -157,17 +182,43 @@ async def get_all_machines():
     return machines
 
 @app.get("/machines/{equipment}")
-async def get_machine_records(equipment: str):
-    """Obtiene TODOS los registros de un equipo específico sin límite"""
+async def get_machine_records(
+    equipment: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+):
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
-    cursor.execute("""
+    
+    base_query = """
         SELECT transaction_id, work_order_id, timestamp, operator,
                sensor_data, contextual_info, production_metrics
         FROM machines 
-        WHERE equipment = ? 
-        ORDER BY timestamp DESC
-    """, (equipment,))  # Eliminamos el LIMIT
+        WHERE equipment = ?
+    """
+    
+    conditions = []
+    params = [equipment]
+    
+    if specific_date:
+        conditions.append("DATE(timestamp) = ?")
+        params.append(specific_date)
+    else:
+        if start_date:
+            conditions.append("timestamp >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("timestamp <= ?")
+            params.append(end_date)
+    
+    query = base_query
+    if conditions:
+        query += " AND " + " AND ".join(conditions)
+    
+    query += " ORDER BY timestamp DESC"
+    
+    cursor.execute(query, params)
     
     records = []
     for row in cursor.fetchall():
@@ -183,7 +234,7 @@ async def get_machine_records(equipment: str):
     conn.close()
     
     if not records:
-        raise HTTPException(status_code=404, detail="Equipo no encontrado")
+        raise HTTPException(status_code=404, detail="No se encontraron registros para los criterios especificados")
     return records
 
 # Endpoint para subir un PDF

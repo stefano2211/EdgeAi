@@ -10,6 +10,7 @@ import smtplib
 from email.mime.text import MIMEText
 import os
 import logging
+from pydantic import BaseModel
 
 mcp = FastMCP("Industrial Analytics MCP")
 API_URL = "http://api:5000"
@@ -137,13 +138,58 @@ async def process_event(ctx: Context, event_type: str, description: str, timesta
 # HERRAMIENTAS DE MONITOREO EN TIEMPO REAL MESS
 # =============================================
 
+class TimeFilter(BaseModel):
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    specific_date: Optional[str] = None
+
+    def validate_dates(self):
+        if self.specific_date and (self.start_date or self.end_date):
+            raise ValueError("No se puede especificar fecha específica junto con rango de fechas")
+        
+        try:
+            if self.specific_date:
+                datetime.strptime(self.specific_date, "%Y-%m-%d")
+            if self.start_date:
+                datetime.strptime(self.start_date, "%Y-%m-%d")
+            if self.end_date:
+                datetime.strptime(self.end_date, "%Y-%m-%d")
+        except ValueError as e:
+            raise ValueError(f"Formato de fecha inválido. Use YYYY-MM-DD: {str(e)}")
+
 
 @mcp.tool()
-async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str:
+async def equipment_status(
+    ctx: Context, 
+    equipment: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Obtiene el estado del equipo con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
     endpoint = f"{API_URL}/machines/{equipment}" if equipment else f"{API_URL}/machines/"
     
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(endpoint)
+        response = await client.get(endpoint, params=params)
         if response.status_code == 404:
             return f"Equipo {equipment} no encontrado" if equipment else "No hay equipos registrados"
         
@@ -170,13 +216,38 @@ async def equipment_status(ctx: Context, equipment: Optional[str] = None) -> str
         return "\n".join(report)
 
 @mcp.tool()
-async def production_dashboard(ctx: Context) -> str:
+async def production_dashboard(
+    ctx: Context,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Dashboard de producción con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/")
+        response = await client.get(f"{API_URL}/machines/", params=params)
         machines = response.json()
         
         if not machines:
-            return "No hay datos de producción disponibles"
+            return "No hay datos de producción disponibles para el período seleccionado"
         
         total_production = sum(m["production_metrics"]["quantity"] for m in machines)
         unique_products = {m["production_metrics"]["product_type"] for m in machines}
@@ -209,13 +280,39 @@ async def production_dashboard(ctx: Context) -> str:
 
 
 @mcp.tool()
-async def product_analysis(ctx: Context, product_type: str) -> str:
+async def product_analysis(
+    ctx: Context, 
+    product_type: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Análisis de producto con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/")
+        response = await client.get(f"{API_URL}/machines/", params=params)
         machines = [m for m in response.json() if m["production_metrics"]["product_type"].lower() == product_type.lower()]
         
         if not machines:
-            return f"No hay datos para el producto {product_type}"
+            return f"No hay datos para el producto {product_type} en el período seleccionado"
         
         total = sum(m["production_metrics"]["quantity"] for m in machines)
         equipment_count = len({m["equipment"] for m in machines})
@@ -241,13 +338,44 @@ async def product_analysis(ctx: Context, product_type: str) -> str:
         """
 
 @mcp.tool()
-async def equipment_productivity(ctx: Context, equipment: str) -> str:
+async def equipment_productivity(
+    ctx: Context, 
+    equipment: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Productividad de equipo con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}")
+        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
         if not records:
-            return f"No hay datos para {equipment}"
+            date_info = ""
+            if time_filter.specific_date:
+                date_info = f" para la fecha {time_filter.specific_date}"
+            elif time_filter.start_date or time_filter.end_date:
+                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
+            return f"No hay datos para {equipment}{date_info}"
         
         product_stats = {}
         for record in records:
@@ -291,9 +419,36 @@ async def equipment_productivity(ctx: Context, equipment: str) -> str:
 # =============================================
 
 @mcp.tool()
-async def predict_production(ctx: Context, product_type: str, hours: int) -> str:
+async def predict_production(
+    ctx: Context, 
+    product_type: str, 
+    hours: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Predicción de producción con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/")
+        response = await client.get(f"{API_URL}/machines/", params=params)
         relevant_records = [
             r for r in response.json() 
             if r["production_metrics"]["product_type"].lower() == product_type.lower()
@@ -302,7 +457,7 @@ async def predict_production(ctx: Context, product_type: str, hours: int) -> str
         if len(relevant_records) < 5:
             return f"Insuficientes datos para {product_type} (mínimo 5 registros)"
         
-        # Procesamiento original (sin cambios)
+        # Resto de la función se mantiene igual...
         production_data = []
         equipment_stats = {}
         
@@ -324,7 +479,6 @@ async def predict_production(ctx: Context, product_type: str, hours: int) -> str
         
         rules = relevant_records[0]["contextual_info"]["compliance_rules"]
         
-        # Formateo completo de TODOS los registros
         all_records = "\n".join(
             f"📅 {d['time']} | 🏭 {d['equipment']} | 👷 {d['operator']} | "
             f"📦 {d['quantity']} unidades | 🌡️ {d['conditions']['temp']}°C | "
@@ -353,15 +507,46 @@ async def predict_production(ctx: Context, product_type: str, hours: int) -> str
         """
 
 @mcp.tool()
-async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
+async def predict_temperature(
+    ctx: Context, 
+    equipment: str, 
+    hours: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Predice la temperatura del equipo con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}")
+        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
         if len(records) < 5:
-            return f"Insuficientes datos para {equipment} (mínimo 5 registros)"
+            date_info = ""
+            if time_filter.specific_date:
+                date_info = f" para la fecha {time_filter.specific_date}"
+            elif time_filter.start_date or time_filter.end_date:
+                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
+            return f"Insuficientes datos para {equipment}{date_info} (mínimo 5 registros)"
         
-        # Procesamiento original (sin cambios)
         temp_data = []
         for r in records:
             temp_data.append({
@@ -374,7 +559,6 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
         
         rules = records[0]["contextual_info"]["compliance_rules"]
         
-        # Formateo completo de TODOS los registros
         all_readings = "\n".join(
             f"📅 {d['time']} | 🌡️ {d['temperature']}°C | 🌀 {d['pressure']} psi | "
             f"📳 {d['vibration']} mm/s | 📦 {d['production']} unidades"
@@ -402,15 +586,46 @@ async def predict_temperature(ctx: Context, equipment: str, hours: int) -> str:
         """
 
 @mcp.tool()
-async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) -> str:
+async def predict_maintenance(
+    ctx: Context, 
+    equipment: str, 
+    horizon_hours: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Predice necesidades de mantenimiento con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}")
+        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
         if len(records) < 10:
-            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
+            date_info = ""
+            if time_filter.specific_date:
+                date_info = f" para la fecha {time_filter.specific_date}"
+            elif time_filter.start_date or time_filter.end_date:
+                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
+            return f"Insuficientes datos para {equipment}{date_info} (mínimo 10 registros)"
         
-        # Procesamiento original (sin cambios)
         maintenance_data = []
         for r in records:
             maintenance_data.append({
@@ -428,7 +643,6 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
         
         rules = records[0]["contextual_info"]["compliance_rules"]
         
-        # Formateo completo de TODOS los registros
         all_maintenance = "\n".join(
             f"📅 {d['time']} | 🌡️ {d['sensors']['temp']}°C | 🌀 {d['sensors']['pressure']} psi | "
             f"📳 {d['sensors']['vibration']} mm/s | 📦 {d['production']['quantity']} {d['production']['type']}"
@@ -458,13 +672,44 @@ async def predict_maintenance(ctx: Context, equipment: str, horizon_hours: int) 
 
 
 @mcp.tool()
-async def analyze_equipment_patterns(ctx: Context, equipment: str) -> str:
+async def analyze_equipment_patterns(
+    ctx: Context, 
+    equipment: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Analiza patrones del equipo con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}")
+        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
         if len(records) < 10:
-            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
+            date_info = ""
+            if time_filter.specific_date:
+                date_info = f" para la fecha {time_filter.specific_date}"
+            elif time_filter.start_date or time_filter.end_date:
+                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
+            return f"Insuficientes datos para {equipment}{date_info} (mínimo 10 registros)"
         
         # Calcular estadísticas completas
         temps = [r["sensor_data"]["temperature"] for r in records]
@@ -595,13 +840,44 @@ async def get_pdf_data(request: str, ctx: Context) -> str:
 # =============================================
 
 @mcp.tool()
-async def maintenance_recommendations(ctx: Context, equipment: str) -> str:
+async def maintenance_recommendations(
+    ctx: Context, 
+    equipment: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """Recomendaciones de mantenimiento con filtros temporales."""
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return str(e)
+    
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+    
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}")
+        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
         if not records:
-            return f"No hay datos suficientes para {equipment}"
+            date_info = ""
+            if time_filter.specific_date:
+                date_info = f" para la fecha {time_filter.specific_date}"
+            elif time_filter.start_date or time_filter.end_date:
+                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
+            return f"No hay datos suficientes para {equipment}{date_info}"
         
         temps = [r["sensor_data"]["temperature"] for r in records]
         pressures = [r["sensor_data"]["pressure"] for r in records]
