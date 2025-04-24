@@ -144,24 +144,26 @@ class TimeFilter(BaseModel):
     specific_date: Optional[str] = None
 
     def validate_dates(self):
-        if self.specific_date and (self.start_date or self.end_date):
-            raise ValueError("No se puede especificar fecha específica junto con rango de fechas")
-        
-        try:
-            if self.specific_date:
+        if self.specific_date:
+            try:
                 datetime.strptime(self.specific_date, "%Y-%m-%d")
+                # Si hay specific_date, ignorar start_date y end_date
+                self.start_date = None
+                self.end_date = None
+            except ValueError as e:
+                raise ValueError(f"Formato de fecha específica inválido. Use YYYY-MM-DD: {str(e)}")
+        else:
             if self.start_date:
                 datetime.strptime(self.start_date, "%Y-%m-%d")
             if self.end_date:
                 datetime.strptime(self.end_date, "%Y-%m-%d")
-        except ValueError as e:
-            raise ValueError(f"Formato de fecha inválido. Use YYYY-MM-DD: {str(e)}")
-
+            if self.start_date and self.end_date and self.start_date > self.end_date:
+                raise ValueError("La fecha de inicio no puede ser mayor que la fecha de fin")
 
 @mcp.tool()
 async def equipment_status(
     ctx: Context, 
-    equipment: Optional[str] = None,
+    equipment: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
@@ -177,7 +179,7 @@ async def equipment_status(
     except ValueError as e:
         return str(e)
     
-    endpoint = f"{API_URL}/machines/{equipment}" if equipment else f"{API_URL}/machines/"
+    endpoint = f"{API_URL}/machines/{equipment}"
     
     params = {}
     if time_filter.specific_date:
@@ -189,31 +191,79 @@ async def equipment_status(
             params["end_date"] = time_filter.end_date
     
     async with httpx.AsyncClient() as client:
-        response = await client.get(endpoint, params=params)
-        if response.status_code == 404:
-            return f"Equipo {equipment} no encontrado" if equipment else "No hay equipos registrados"
-        
-        machines = response.json() if isinstance(response.json(), list) else [response.json()]
-        
-        report = ["🏭 Estado del Equipamiento:"]
-        for machine in machines:
-            status = (
-                f"\n🔧 {machine['equipment']} ({machine['production_metrics']['product_type']})"
-                f"\n- Operador: {machine['operator']}"
-                f"\n- Producción: {machine['production_metrics']['quantity']} unidades"
-                f"\n- Sensores: {machine['sensor_data']['temperature']}°C (Límite: {machine['contextual_info']['compliance_rules']['temperature_limit']}°C), "
-                f"{machine['sensor_data']['pressure']} psi (Límite: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi), "
-                f"{machine['sensor_data']['vibration']} mm/s"
-                f"\n- Última actualización: {machine['timestamp']}"
-                f"\n- Notas de cumplimiento: {machine['contextual_info']['compliance_rules']['process_notes']}"
-                f"\n\n💡 CONTEXTO PARA EL LLM: Los valores de sensores deben compararse con los límites especificados. "
-                f"Generar alertas si temperatura > {machine['contextual_info']['compliance_rules']['temperature_limit']}°C "
-                f"o presión > {machine['contextual_info']['compliance_rules']['pressure_limit']} psi. "
-                f"Considerar notas operativas: {machine['contextual_info']['compliance_rules']['process_notes']}"
-            )
-            report.append(status)
-        
-        return "\n".join(report)
+        try:
+            response = await client.get(endpoint, params=params)
+            if response.status_code == 404:
+                return f"Equipo {equipment} no encontrado"
+            
+            machines = response.json()
+            if not machines:
+                return f"No se encontraron datos para {equipment}"
+            
+            # Validar que sea una lista
+            if not isinstance(machines, list):
+                machines = [machines]
+            
+            report = ["🏭 Estado del Equipamiento:"]
+            for machine in machines:
+                # Validar campos esenciales
+                required_fields = {
+                    'equipment': str,
+                    'production_metrics': dict,
+                    'sensor_data': dict,
+                    'contextual_info': dict,
+                    'operator': str,
+                    'timestamp': str
+                }
+                
+                missing_fields = []
+                for field, field_type in required_fields.items():
+                    if field not in machine or not isinstance(machine[field], field_type):
+                        missing_fields.append(field)
+                
+                if missing_fields:
+                    logger.error(f"Datos incompletos para {equipment}: Faltan {missing_fields}")
+                    continue
+                
+                # Construir reporte
+                status = (
+                    f"\n🔧 {machine['equipment']} ({machine['production_metrics']['product_type']})"
+                    f"\n- Operador: {machine['operator']}"
+                    f"\n- Producción: {machine['production_metrics']['quantity']} unidades"
+                    f"\n- Sensores:"
+                    f"\n  • Temperatura: {machine['sensor_data']['temperature']}°C (Límite: {machine['contextual_info']['compliance_rules']['temperature_limit']}°C)"
+                    f"\n  • Presión: {machine['sensor_data']['pressure']} psi (Límite: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi)"
+                    f"\n  • Vibración: {machine['sensor_data']['vibration']} mm/s"
+                    f"\n- Última actualización: {machine['timestamp']}"
+                    f"\n- Notas: {machine['contextual_info']['compliance_rules'].get('process_notes', 'Ninguna')}"
+                )
+                report.append(status)
+                
+                # Generar alertas
+                alerts = []
+                sensor_data = machine['sensor_data']
+                rules = machine['contextual_info']['compliance_rules']
+                
+                if sensor_data['temperature'] > rules['temperature_limit']:
+                    alerts.append(f"🚨 ALERTA: Temperatura ({sensor_data['temperature']}°C) excede el límite ({rules['temperature_limit']}°C)")
+                
+                if sensor_data['pressure'] > rules['pressure_limit']:
+                    alerts.append(f"🚨 ALERTA: Presión ({sensor_data['pressure']} psi) excede el límite ({rules['pressure_limit']} psi)")
+                
+                if sensor_data['vibration'] > 3.5:  # Límite genérico para vibración
+                    alerts.append(f"⚠️ ADVERTENCIA: Vibración elevada ({sensor_data['vibration']} mm/s)")
+                
+                if alerts:
+                    report.append("\n" + "\n".join(alerts))
+            
+            return "\n".join(report)
+            
+        except httpx.RequestError as e:
+            logger.error(f"Error de conexión: {str(e)}")
+            return f"Error al conectar con la API: {str(e)}"
+        except Exception as e:
+            logger.error(f"Error inesperado: {str(e)}")
+            return f"Error al procesar los datos: {str(e)}"
 
 @mcp.tool()
 async def production_dashboard(
@@ -222,7 +272,6 @@ async def production_dashboard(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    """Dashboard de producción con filtros temporales."""
     time_filter = TimeFilter(
         start_date=start_date,
         end_date=end_date,
@@ -246,8 +295,9 @@ async def production_dashboard(
         response = await client.get(f"{API_URL}/machines/", params=params)
         machines = response.json()
         
+        # Resto del código original SIN CAMBIOS
         if not machines:
-            return "No hay datos de producción disponibles para el período seleccionado"
+            return "No hay datos de producción disponibles"
         
         total_production = sum(m["production_metrics"]["quantity"] for m in machines)
         unique_products = {m["production_metrics"]["product_type"] for m in machines}
@@ -287,7 +337,6 @@ async def product_analysis(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    """Análisis de producto con filtros temporales."""
     time_filter = TimeFilter(
         start_date=start_date,
         end_date=end_date,
@@ -311,8 +360,9 @@ async def product_analysis(
         response = await client.get(f"{API_URL}/machines/", params=params)
         machines = [m for m in response.json() if m["production_metrics"]["product_type"].lower() == product_type.lower()]
         
+        # Resto del código original SIN CAMBIOS
         if not machines:
-            return f"No hay datos para el producto {product_type} en el período seleccionado"
+            return f"No hay datos para el producto {product_type}"
         
         total = sum(m["production_metrics"]["quantity"] for m in machines)
         equipment_count = len({m["equipment"] for m in machines})
@@ -345,7 +395,6 @@ async def equipment_productivity(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    """Productividad de equipo con filtros temporales."""
     time_filter = TimeFilter(
         start_date=start_date,
         end_date=end_date,
@@ -369,13 +418,9 @@ async def equipment_productivity(
         response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
+        # Resto del código original SIN CAMBIOS
         if not records:
-            date_info = ""
-            if time_filter.specific_date:
-                date_info = f" para la fecha {time_filter.specific_date}"
-            elif time_filter.start_date or time_filter.end_date:
-                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
-            return f"No hay datos para {equipment}{date_info}"
+            return f"No hay datos para {equipment}"
         
         product_stats = {}
         for record in records:
@@ -427,7 +472,6 @@ async def predict_production(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    """Predicción de producción con filtros temporales."""
     time_filter = TimeFilter(
         start_date=start_date,
         end_date=end_date,
@@ -454,10 +498,10 @@ async def predict_production(
             if r["production_metrics"]["product_type"].lower() == product_type.lower()
         ]
         
+        # Resto del código original SIN CAMBIOS
         if len(relevant_records) < 5:
             return f"Insuficientes datos para {product_type} (mínimo 5 registros)"
         
-        # Resto de la función se mantiene igual...
         production_data = []
         equipment_stats = {}
         
@@ -515,7 +559,6 @@ async def predict_temperature(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    """Predice la temperatura del equipo con filtros temporales."""
     time_filter = TimeFilter(
         start_date=start_date,
         end_date=end_date,
@@ -539,13 +582,9 @@ async def predict_temperature(
         response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
+        # Resto del código original SIN CAMBIOS
         if len(records) < 5:
-            date_info = ""
-            if time_filter.specific_date:
-                date_info = f" para la fecha {time_filter.specific_date}"
-            elif time_filter.start_date or time_filter.end_date:
-                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
-            return f"Insuficientes datos para {equipment}{date_info} (mínimo 5 registros)"
+            return f"Insuficientes datos para {equipment} (mínimo 5 registros)"
         
         temp_data = []
         for r in records:
@@ -594,7 +633,6 @@ async def predict_maintenance(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    """Predice necesidades de mantenimiento con filtros temporales."""
     time_filter = TimeFilter(
         start_date=start_date,
         end_date=end_date,
@@ -618,13 +656,9 @@ async def predict_maintenance(
         response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
+        # Resto del código original SIN CAMBIOS
         if len(records) < 10:
-            date_info = ""
-            if time_filter.specific_date:
-                date_info = f" para la fecha {time_filter.specific_date}"
-            elif time_filter.start_date or time_filter.end_date:
-                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
-            return f"Insuficientes datos para {equipment}{date_info} (mínimo 10 registros)"
+            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
         
         maintenance_data = []
         for r in records:
@@ -679,7 +713,6 @@ async def analyze_equipment_patterns(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    """Analiza patrones del equipo con filtros temporales."""
     time_filter = TimeFilter(
         start_date=start_date,
         end_date=end_date,
@@ -703,15 +736,10 @@ async def analyze_equipment_patterns(
         response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
+        # Resto del código original SIN CAMBIOS
         if len(records) < 10:
-            date_info = ""
-            if time_filter.specific_date:
-                date_info = f" para la fecha {time_filter.specific_date}"
-            elif time_filter.start_date or time_filter.end_date:
-                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
-            return f"Insuficientes datos para {equipment}{date_info} (mínimo 10 registros)"
+            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
         
-        # Calcular estadísticas completas
         temps = [r["sensor_data"]["temperature"] for r in records]
         pressures = [r["sensor_data"]["pressure"] for r in records]
         vibes = [r["sensor_data"]["vibration"] for r in records]
@@ -777,63 +805,63 @@ async def analyze_equipment_patterns(
 # =============================================
 
 @mcp.tool()
-async def get_pdf_data(request: str, ctx: Context) -> str:
-    """Realiza una búsqueda semántica entre los PDFs para resolver la solicitud del usuario"""
-    if not request:
-        return "Por favor, especifica qué información deseas extraer o analizar de los PDFs."
-    
+async def get_pdf_data(ctx: Context, request: str) -> str:
+    """Busca en PDFs relevantes para la consulta"""
     async with httpx.AsyncClient() as client:
-        # Obtener todos los PDFs desde la API
-        response = await client.get(f"{API_URL}/pdfs/")
-        if response.status_code != 200:
-            return f"Error al obtener PDFs: {response.text}"
-        
-        pdfs = response.json()
-        if not pdfs:
-            return "No hay PDFs almacenados en la base de datos."
-        
-        # Generar embedding para la solicitud del usuario
-        request_embedding = model.encode(request, convert_to_tensor=True)
-        
-        # Calcular embeddings y similitudes para cada PDF
-        pdfs_with_scores = []
-        for pdf in pdfs:
-            content = pdf["content"]
-            if len(content) > 1000:  # Limitar para optimizar
-                content = content[:1000]
-            pdf_embedding = model.encode(content, convert_to_tensor=True)
-            similarity = util.pytorch_cos_sim(request_embedding, pdf_embedding).item()
-            if similarity > 0.3:  # Umbral de relevancia
-                pdfs_with_scores.append((pdf["filename"], content, similarity))
-        
-        if not pdfs_with_scores:
-            return f"No se encontraron PDFs relevantes para la solicitud: '{request}'."
-        
-        # Ordenar por similitud (mayor primero)
-        pdfs_with_scores.sort(key=lambda x: x[2], reverse=True)
-        
-        # Limitar a los 3 más relevantes
-        selected_pdfs = pdfs_with_scores[:min(3, len(pdfs_with_scores))]
-        
-        data_summary = ""
-        for filename, content, similarity in selected_pdfs:
-            data_summary += f"""
-            Contenido del PDF '{filename}':
-            {content}
-            (Similitud: {similarity:.2f})
-            """
-        
-        instruction = f"""
-        Basado en el siguiente contenido extraído de los PDFs más relevantes:
-        {data_summary}
-        
-        Por favor, realiza el siguiente análisis o responde a la solicitud del usuario: '{request}'.
-        Extrae la información relevante del contenido y proporciona una respuesta detallada.
-        Si el contenido no contiene los datos necesarios para responder, indícalo y sugiere cómo proceder.
-        """
-        return instruction
+        try:
+            # 1. Obtener lista de PDFs disponibles
+            pdf_list_response = await client.get(f"{API_URL}/pdfs/list")
+            pdf_list = pdf_list_response.json()
+            
+            if not pdf_list:
+                return "No hay PDFs disponibles en el sistema."
 
+            # 2. Seleccionar los más relevantes
+            model = SentenceTransformer('all-MiniLM-L6-v2')
+            request_embedding = model.encode(request, convert_to_tensor=True)
+            
+            pdf_scores = []
+            for pdf in pdf_list:
+                text_to_embed = f"{pdf['filename']} {pdf['description']}"
+                pdf_embedding = model.encode(text_to_embed, convert_to_tensor=True)
+                similarity = util.pytorch_cos_sim(request_embedding, pdf_embedding).item()
+                pdf_scores.append((pdf['filename'], similarity))
+            
+            # Ordenar y filtrar por relevancia
+            pdf_scores.sort(key=lambda x: x[1], reverse=True)
+            top_pdfs = [pdf[0] for pdf in pdf_scores[:2] if pdf[1] > 0.3]
 
+            if not top_pdfs:
+                return f"No se encontraron PDFs relevantes para: '{request}'"
+
+            # 3. Obtener contenidos
+            content_response = await client.get(
+                f"{API_URL}/pdfs/content/",
+                params={"filenames": top_pdfs}
+            )
+            
+            if content_response.status_code != 200:
+                return f"Error al obtener contenidos: {content_response.text}"
+            
+            pdf_contents = content_response.json()
+            
+            # 4. Preparar respuesta estructurada
+            context = {
+                "user_request": request,
+                "pdfs": pdf_contents["pdfs"],
+                "analysis_instructions": (
+                    "Analiza los documentos y responde considerando:\n"
+                    "1. Relevancia para la solicitud\n"
+                    "2. Datos técnicos encontrados\n"
+                    "3. Posibles acciones recomendadas"
+                )
+            }
+            
+            return json.dumps(context, indent=2)
+            
+        except Exception as e:
+            logger.error(f"Error en get_pdf_data: {str(e)}")
+            return f"Error al procesar la solicitud: {str(e)}"
 
 # =============================================
 # HERRAMIENTAS DE MANTENIMIENTO
@@ -847,7 +875,6 @@ async def maintenance_recommendations(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    """Recomendaciones de mantenimiento con filtros temporales."""
     time_filter = TimeFilter(
         start_date=start_date,
         end_date=end_date,
@@ -871,13 +898,9 @@ async def maintenance_recommendations(
         response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
         records = response.json()
         
+        # Resto del código original SIN CAMBIOS
         if not records:
-            date_info = ""
-            if time_filter.specific_date:
-                date_info = f" para la fecha {time_filter.specific_date}"
-            elif time_filter.start_date or time_filter.end_date:
-                date_info = f" entre {time_filter.start_date or 'inicio'} y {time_filter.end_date or 'ahora'}"
-            return f"No hay datos suficientes para {equipment}{date_info}"
+            return f"No hay datos suficientes para {equipment}"
         
         temps = [r["sensor_data"]["temperature"] for r in records]
         pressures = [r["sensor_data"]["pressure"] for r in records]

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File,Form,Query
 import sqlite3
 from pydantic import BaseModel
 from datetime import datetime
@@ -66,6 +66,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             filename TEXT NOT NULL,
             content TEXT NOT NULL,
+            description TEXT NOT NULL,
             upload_timestamp DATETIME NOT NULL
         )
     """)
@@ -96,7 +97,7 @@ async def create_machine_record(record: MachineRecord):
             record.operator,
             record.sensor_data.json(),
             record.contextual_info.json(),
-            record.production_metrics.json()  # Nuevo campo
+            record.production_metrics.json()
         ))
         conn.commit()
         return {"message": "Registro creado exitosamente"}
@@ -191,15 +192,15 @@ async def get_machine_records(
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
     
-    base_query = """
-        SELECT transaction_id, work_order_id, timestamp, operator,
+    query = """
+        SELECT transaction_id, work_order_id, timestamp, equipment, operator,
                sensor_data, contextual_info, production_metrics
         FROM machines 
         WHERE equipment = ?
     """
     
-    conditions = []
     params = [equipment]
+    conditions = []
     
     if specific_date:
         conditions.append("DATE(timestamp) = ?")
@@ -212,7 +213,6 @@ async def get_machine_records(
             conditions.append("timestamp <= ?")
             params.append(end_date)
     
-    query = base_query
     if conditions:
         query += " AND " + " AND ".join(conditions)
     
@@ -226,20 +226,23 @@ async def get_machine_records(
             "transaction_id": row[0],
             "work_order_id": row[1],
             "timestamp": row[2],
-            "operator": row[3],
-            "sensor_data": json.loads(row[4]),
-            "contextual_info": json.loads(row[5]),
-            "production_metrics": json.loads(row[6])
+            "equipment": row[3],  # Asegurando que el campo equipment esté incluido
+            "operator": row[4],
+            "sensor_data": json.loads(row[5]),
+            "contextual_info": json.loads(row[6]),
+            "production_metrics": json.loads(row[7])
         })
     conn.close()
     
     if not records:
-        raise HTTPException(status_code=404, detail="No se encontraron registros para los criterios especificados")
+        raise HTTPException(status_code=404, detail="Equipo no encontrado")
+    
     return records
 
-# Endpoint para subir un PDF
+
+# Endpoint para obtener todos los PDFs (sin búsqueda inteligente)
 @app.post("/pdfs/")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(file: UploadFile = File(...), description: str = Form(None)):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Solo se permiten archivos PDF")
     
@@ -249,39 +252,79 @@ async def upload_pdf(file: UploadFile = File(...)):
     for page in pdf_reader.pages:
         content += page.extract_text() or ""
     
-    # Guardar en la base de datos
+    # Guardar en la base de datos con descripción
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO pdfs (filename, content, upload_timestamp)
-        VALUES (?, ?, ?)
-    """, (file.filename, content, datetime.now().isoformat()))
+        INSERT INTO pdfs (filename, content, description, upload_timestamp)
+        VALUES (?, ?, ?, ?)
+    """, (file.filename, content, description, datetime.now().isoformat()))
     conn.commit()
     conn.close()
     
     return {"message": f"PDF '{file.filename}' subido y procesado exitosamente"}
 
-# Endpoint para obtener todos los PDFs (sin búsqueda inteligente)
-@app.get("/pdfs/")
-async def get_all_pdfs():
+@app.get("/pdfs/list")
+async def list_pdfs():
+    """Devuelve lista de PDFs con sus descripciones"""
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT filename, content, upload_timestamp FROM pdfs ORDER BY upload_timestamp DESC")
-    rows = cursor.fetchall()
+    cursor.execute("SELECT filename, description FROM pdfs ORDER BY upload_timestamp DESC")
+    pdfs = [{"filename": row[0], "description": row[1]} for row in cursor.fetchall()]
     conn.close()
-    return [{"filename": row[0], "content": row[1], "upload_timestamp": row[2]} for row in rows]
+    return pdfs
 
-# Endpoint para obtener un PDF por nombre de archivo
-@app.get("/pdfs/{filename}")
-async def get_pdf_content(filename: str):
+
+
+@app.get("/pdfs/content/")
+async def get_pdf_contents(
+    filenames: List[str] = Query(..., description="Nombres de los archivos PDF a consultar"),
+    max_length: Optional[int] = Query(None, description="Longitud máxima del contenido")
+):
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT filename, content, upload_timestamp FROM pdfs WHERE filename = ?", (filename,))
-    row = cursor.fetchone()
+    
+    # Normalizar nombres de archivos
+    normalized_filenames = [f.strip() for f in filenames]
+    
+    placeholders = ','.join(['?'] * len(normalized_filenames))
+    
+    cursor.execute(f"""
+        SELECT filename, content, description 
+        FROM pdfs 
+        WHERE LOWER(TRIM(filename)) IN ({placeholders})
+    """, [f.lower() for f in normalized_filenames])
+    
+    results = []
+    for row in cursor.fetchall():
+        filename, content, description = row
+        results.append({
+            "filename": filename,
+            "description": description or "Sin descripción",
+            "content": content[:max_length] if max_length else content,
+            "content_length": len(content),
+            "truncated": max_length is not None and len(content) > max_length
+        })
+    
     conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="PDF no encontrado")
-    return {"filename": row[0], "content": row[1], "upload_timestamp": row[2]}
+    
+    if not results:
+        found_files = cursor.execute("SELECT filename FROM pdfs").fetchall()
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "PDFs no encontrados",
+                "requested": normalized_filenames,
+                "available": [f[0] for f in found_files]
+            }
+        )
+    
+    return {
+        "count": len(results),
+        "requested_files": normalized_filenames,
+        "pdfs": results
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
