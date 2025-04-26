@@ -161,6 +161,119 @@ class TimeFilter(BaseModel):
                 raise ValueError("La fecha de inicio no puede ser mayor que la fecha de fin")
 
 @mcp.tool()
+async def get_machine_records(
+    ctx: Context,
+    equipment: Optional[str] = None,
+    product_type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """
+    Retrieves machine records with flexible filtering options in a single request.
+    
+    Parameters:
+    - equipment: Filter by machine name (optional)
+    - product_type: Filter by product type (optional)
+    - start_date: Start date for range (YYYY-MM-DD)
+    - end_date: End date for range (YYYY-MM-DD)
+    - specific_date: Query for a specific date (YYYY-MM-DD)
+    
+    Returns formatted records with operational data and summary statistics.
+    """
+    time_filter = TimeFilter(
+        start_date=start_date,
+        end_date=end_date,
+        specific_date=specific_date
+    )
+    
+    try:
+        time_filter.validate_dates()
+    except ValueError as e:
+        return f"Invalid date parameters: {str(e)}"
+
+    # Build API endpoint
+    endpoint = f"{API_URL}/machines/"
+    if equipment:
+        endpoint += f"{equipment}"
+    
+    # Prepare query parameters
+    params = {}
+    if time_filter.specific_date:
+        params["specific_date"] = time_filter.specific_date
+    else:
+        if time_filter.start_date:
+            params["start_date"] = time_filter.start_date
+        if time_filter.end_date:
+            params["end_date"] = time_filter.end_date
+
+    async with httpx.AsyncClient() as client:
+        try:
+            # Single API request
+            response = await client.get(endpoint, params=params)
+            records = response.json()
+            
+            if not records:
+                return "No records found matching the specified criteria"
+            
+            # Apply product filter if specified
+            if product_type:
+                records = [
+                    r for r in records 
+                    if r["production_metrics"]["product_type"].lower() == product_type.lower()
+                ]
+                if not records:
+                    return f"No records found for product type: {product_type}"
+            
+            # Generate report header
+            report = [
+                "MACHINE PRODUCTION RECORDS",
+                f"Filters - Equipment: {equipment or 'All'}, "
+                f"Product: {product_type or 'All'}, "
+                f"Date Range: {time_filter.specific_date or f'{time_filter.start_date} to {time_filter.end_date}'}",
+                f"Total Records: {len(records)}",
+                "\nDETAILED RECORDS:"
+            ]
+            
+            # Format individual records
+            for record in records:
+                report.append(
+                    f"\n[Record ID: {record['transaction_id']}]"
+                    f"\nDate/Time: {record['timestamp']}"
+                    f"\nMachine: {record['equipment']}"
+                    f"\nOperator: {record['operator']}"
+                    f"\nProduction: {record['production_metrics']['quantity']} units of {record['production_metrics']['product_type']}"
+                    f"\nSensor Readings:"
+                    f"\n- Temperature: {record['sensor_data']['temperature']}°C (Limit: {record['contextual_info']['compliance_rules']['temperature_limit']}°C)"
+                    f"\n- Pressure: {record['sensor_data']['pressure']} psi (Limit: {record['contextual_info']['compliance_rules']['pressure_limit']} psi)"
+                    f"\n- Vibration: {record['sensor_data']['vibration']} mm/s"
+                    f"\nProcess Notes: {record['contextual_info']['compliance_rules'].get('process_notes', 'None')}"
+                )
+            
+            # Add statistical summary
+            temp_readings = [r['sensor_data']['temperature'] for r in records]
+            pressure_readings = [r['sensor_data']['pressure'] for r in records]
+            
+            report.append("\nSTATISTICAL SUMMARY:")
+            report.append(f"- Temperature Range: {min(temp_readings)}°C to {max(temp_readings)}°C")
+            report.append(f"- Pressure Range: {min(pressure_readings)} to {max(pressure_readings)} psi")
+            report.append(f"- Unique Products: {len({r['production_metrics']['product_type'] for r in records})}")
+            report.append(f"- Operators Involved: {len({r['operator'] for r in records})}")
+            
+            return "\n".join(report)
+            
+        except httpx.RequestError as e:
+            logger.error(f"API request failed: {str(e)}")
+            return "Error retrieving data from production API"
+        except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
+            return "Error processing production records"
+
+
+
+
+
+@mcp.tool()
 async def equipment_status(
     ctx: Context, 
     equipment: str,
@@ -524,9 +637,9 @@ async def predict_production(
         rules = relevant_records[0]["contextual_info"]["compliance_rules"]
         
         all_records = "\n".join(
-            f"📅 {d['time']} | 🏭 {d['equipment']} | 👷 {d['operator']} | "
-            f"📦 {d['quantity']} unidades | 🌡️ {d['conditions']['temp']}°C | "
-            f"🌀 {d['conditions']['pressure']} psi"
+            f"Fecha del registro: {d['time']} | Equipo: {d['equipment']} | Operador de la maquina {d['operator']} | "
+            f"Unidades producidad {d['quantity']} unidades | Temperatura de la maquina en funcionamiento {d['conditions']['temp']}°C | "
+            f"Presion de la maquina {d['conditions']['pressure']} psi,"
             for d in production_data
         )
         
@@ -590,6 +703,7 @@ async def predict_temperature(
         for r in records:
             temp_data.append({
                 "time": r["timestamp"],
+                "operator": r["operator"],
                 "temperature": r["sensor_data"]["temperature"],
                 "pressure": r["sensor_data"]["pressure"],
                 "vibration": r["sensor_data"]["vibration"],
@@ -599,8 +713,8 @@ async def predict_temperature(
         rules = records[0]["contextual_info"]["compliance_rules"]
         
         all_readings = "\n".join(
-            f"📅 {d['time']} | 🌡️ {d['temperature']}°C | 🌀 {d['pressure']} psi | "
-            f"📳 {d['vibration']} mm/s | 📦 {d['production']} unidades"
+            f"Fecha de registro de la maquina {d['time']} | Operador Maquina{d['operator']} |Temperatura de la maquina {d['temperature']}°C | Presion de la maquina {d['pressure']} psi | "
+            f"Vibracion de la maquina {d['vibration']} mm/s | Producion de la maquina {d['production']} unidades,"
             for d in temp_data
         )
         
@@ -664,6 +778,7 @@ async def predict_maintenance(
         for r in records:
             maintenance_data.append({
                 "time": r["timestamp"],
+                "operator": r["operator"],
                 "sensors": {
                     "temp": r["sensor_data"]["temperature"],
                     "pressure": r["sensor_data"]["pressure"],
@@ -678,8 +793,8 @@ async def predict_maintenance(
         rules = records[0]["contextual_info"]["compliance_rules"]
         
         all_maintenance = "\n".join(
-            f"📅 {d['time']} | 🌡️ {d['sensors']['temp']}°C | 🌀 {d['sensors']['pressure']} psi | "
-            f"📳 {d['sensors']['vibration']} mm/s | 📦 {d['production']['quantity']} {d['production']['type']}"
+            f"Fecha del registro {d['time']} | Temperatura de la maquina {d['sensors']['temp']}°C | Operador de la maquina {d['operator']} |Presion de la maquina {d['sensors']['pressure']} psi | "
+            f"Vibracion de la maquina {d['sensors']['vibration']} mm/s | Producion de la maquina {d['production']['quantity']} tipo de producion {d['production']['type']},"
             for d in maintenance_data
         )
         
@@ -829,7 +944,7 @@ async def get_pdf_data(ctx: Context, request: str) -> str:
             
             # Ordenar y filtrar por relevancia
             pdf_scores.sort(key=lambda x: x[1], reverse=True)
-            top_pdfs = [pdf[0] for pdf in pdf_scores[:2] if pdf[1] > 0.3]
+            top_pdfs = [pdf[0] for pdf in pdf_scores[:2] if pdf[1] > 0.5]
 
             if not top_pdfs:
                 return f"No se encontraron PDFs relevantes para: '{request}'"
