@@ -1,16 +1,14 @@
 import httpx
 from mcp.server.fastmcp import FastMCP, Context
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from datetime import datetime
+from typing import Optional
+import logging
+from pydantic import BaseModel
+import re
 import statistics
 from sentence_transformers import SentenceTransformer, util
 import torch
-import json
-import smtplib
-from email.mime.text import MIMEText
 import os
-import logging
-from pydantic import BaseModel
 
 mcp = FastMCP("Industrial Analytics MCP")
 API_URL = "http://api:5000"
@@ -18,125 +16,6 @@ model = SentenceTransformer('all-MiniLM-L6-v2')
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Configuración de correo y API Key desde variables de entorno
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-SUPERVISOR_EMAIL = os.getenv("SUPERVISOR_EMAIL")
-OPENWEBUI_API_KEY = os.getenv("OPENWEBUI_API_KEY")
-API_URL = "http://api:5000"  # Asegúrate de que esto esté definido
-
-@mcp.tool()
-async def process_event(ctx: Context, event_type: str, description: str, timestamp: str, equipment: str) -> str:
-    """Procesa un evento industrial, lo contextualiza y notifica al supervisor."""
-    logger.info(f"Procesando evento: {event_type} - {equipment}")
-    
-    # Aumentar timeout a 180 segundos
-    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
-        logger.info(f"Obteniendo datos de {equipment} desde la API")
-        response = await client.get(f"{API_URL}/machines/{equipment}", params={"limit": 5})
-        if response.status_code != 200:
-            logger.error(f"Error al obtener datos: {response.text}")
-            return f"Error al obtener datos de {equipment}: {response.text}"
-        
-        machine_data = response.json()
-        latest_record = machine_data[0] if machine_data else {}
-        logger.info("Datos de la máquina obtenidos exitosamente")
-        
-        context = {
-            "event": {
-                "event_type": event_type,
-                "description": description,
-                "timestamp": timestamp,
-                "equipment": equipment
-            },
-            "latest_machine_data": {
-                "sensor_data": latest_record.get("sensor_data", {}),
-                "production_metrics": latest_record.get("production_metrics", {}),
-                "timestamp": latest_record.get("timestamp", ""),
-                "operator": latest_record.get("operator", "")
-            }
-        }
-        
-        OPENWEBUI_URL = "http://open-webui:8080/api/chat/completions"
-        logger.info(f"Enviando solicitud a OpenWebUI: {OPENWEBUI_URL}")
-        prompt = f"""
-        Eres un asistente experto en mantenimiento industrial. Procesa el siguiente evento industrial y genera un informe claro y conciso para el supervisor:
-
-        **Evento**: {event_type} - {description}
-        **Equipo**: {equipment}
-        **Timestamp**: {timestamp}
-        **Datos recientes del equipo**: {json.dumps(context['latest_machine_data'], indent=2)}
-
-        **Instrucciones**:
-        1. Analiza el evento y los datos proporcionados.
-        2. Identifica posibles causas del evento.
-        3. Evalúa los impactos potenciales en la producción.
-        4. Sugiere acciones correctivas específicas.
-        5. Redacta un informe en formato narrativo (sin listas de opciones múltiples).
-
-        **Ejemplo de formato esperado**:
-        Informe para el supervisor:
-        El evento "[event_type]" ocurrió en [equipment] el [timestamp]. Según los datos recientes, [análisis de los datos]. Las posibles causas incluyen [causas]. Esto podría impactar [impactos]. Se recomienda [acciones correctivas].
-        """
-        
-        headers = {
-            "Authorization": f"Bearer {OPENWEBUI_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": "llama3.2:3b",
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        
-        logger.info(f"Enviando payload a OpenWebUI: {json.dumps(payload, indent=2)}")
-        try:
-            response = await client.post(OPENWEBUI_URL, json=payload, headers=headers)
-            logger.info(f"Respuesta de OpenWebUI: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"Error en OpenWebUI: {response.text}")
-                return f"Error al procesar en OpenWebUI (código {response.status_code}): {response.text}"
-            
-            response_json = response.json()
-            logger.info(f"Respuesta completa de OpenWebUI: {json.dumps(response_json, indent=2)}")
-            
-            llm_response = response_json.get("choices", [{}])[0].get("message", {}).get("content", "")
-            logger.info(f"Respuesta del LLM: {llm_response}")
-            
-            if not llm_response:
-                logger.warning("El contenido del LLM está vacío")
-                llm_response = "No se pudo generar un informe debido a un error en el modelo."
-        except httpx.TimeoutException as e:
-            logger.error(f"Timeout al contactar OpenWebUI después de 180 segundos: {str(e)}")
-            return f"Error: Timeout al contactar OpenWebUI después de 180 segundos: {str(e)}"
-        except httpx.RequestError as e:
-            logger.error(f"Error de red al contactar OpenWebUI: {str(e)}")
-            return f"Error de red al contactar OpenWebUI: {str(e)}"
-        
-        logger.info("Enviando correo al supervisor")
-        msg = MIMEText(llm_response, "plain", "utf-8")
-        msg["Subject"] = f"Evento Industrial: {event_type} en {equipment}"
-        msg["From"] = SMTP_USER
-        msg["To"] = SUPERVISOR_EMAIL
-        
-        logger.info(f"Contenido del correo: {llm_response}")
-        
-        try:
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.starttls()
-                server.login(SMTP_USER, SMTP_PASSWORD)
-                server.send_message(msg)
-            logger.info("Correo enviado exitosamente")
-            return f"Evento procesado y enviado al supervisor: {llm_response[:100]}..."
-        except Exception as e:
-            logger.error(f"Error al enviar correo: {str(e)}")
-            return f"Evento procesado pero error al enviar correo: {str(e)}"
-# =============================================
-# HERRAMIENTAS DE MONITOREO EN TIEMPO REAL MESS
-# =============================================
 
 class TimeFilter(BaseModel):
     start_date: Optional[str] = None
@@ -147,7 +26,6 @@ class TimeFilter(BaseModel):
         if self.specific_date:
             try:
                 datetime.strptime(self.specific_date, "%Y-%m-%d")
-                # Si hay specific_date, ignorar start_date y end_date
                 self.start_date = None
                 self.end_date = None
             except ValueError as e:
@@ -163,23 +41,14 @@ class TimeFilter(BaseModel):
 @mcp.tool()
 async def get_machine_records(
     ctx: Context,
-    equipment: Optional[str] = None,
-    product_type: Optional[str] = None,
+    machine: Optional[str] = None,
+    material: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
     """
-    Retrieves machine records with flexible filtering options in a single request.
-    
-    Parameters:
-    - equipment: Filter by machine name (optional)
-    - product_type: Filter by product type (optional)
-    - start_date: Start date for range (YYYY-MM-DD)
-    - end_date: End date for range (YYYY-MM-DD)
-    - specific_date: Query for a specific date (YYYY-MM-DD)
-    
-    Returns formatted records with operational data and summary statistics.
+    Genera un informe detallado de los registros de producción industrial para una máquina y/o material en un período específico.
     """
     time_filter = TimeFilter(
         start_date=start_date,
@@ -190,14 +59,12 @@ async def get_machine_records(
     try:
         time_filter.validate_dates()
     except ValueError as e:
-        return f"Invalid date parameters: {str(e)}"
+        return f"Error en parámetros de fecha: {str(e)}"
 
-    # Build API endpoint
     endpoint = f"{API_URL}/machines/"
-    if equipment:
-        endpoint += f"{equipment}"
+    if machine:
+        endpoint += f"{machine}"
     
-    # Prepare query parameters
     params = {}
     if time_filter.specific_date:
         params["specific_date"] = time_filter.specific_date
@@ -209,858 +76,1103 @@ async def get_machine_records(
 
     async with httpx.AsyncClient() as client:
         try:
-            # Single API request
             response = await client.get(endpoint, params=params)
             records = response.json()
             
             if not records:
-                return "No records found matching the specified criteria"
+                return (
+                    "Informe de Registros de Producción\n"
+                    "================================\n"
+                    f"No se encontraron registros para la máquina '{machine or 'Todas'}' "
+                    f"y material '{material or 'Todos'}' en el período especificado.\n"
+                    "Recomendación: Verifique si los datos están registrados en el sistema o si la máquina estuvo operativa."
+                )
             
-            # Apply product filter if specified
-            if product_type:
+            if material:
                 records = [
                     r for r in records 
-                    if r["production_metrics"]["product_type"].lower() == product_type.lower()
+                    if r["material"].lower() == material.lower()
                 ]
                 if not records:
-                    return f"No records found for product type: {product_type}"
+                    return (
+                        "Informe de Registros de Producción\n"
+                        "================================\n"
+                        f"No se encontraron registros para el material '{material}' "
+                        f"en la máquina '{machine or 'Todas'}'.\n"
+                        "Recomendación: Confirme que el material sea correcto o amplíe el rango de fechas."
+                    )
             
-            # Generate report header
+            period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
             report = [
-                "MACHINE PRODUCTION RECORDS",
-                f"Filters - Equipment: {equipment or 'All'}, "
-                f"Product: {product_type or 'All'}, "
-                f"Date Range: {time_filter.specific_date or f'{time_filter.start_date} to {time_filter.end_date}'}",
-                f"Total Records: {len(records)}",
-                "\nDETAILED RECORDS:"
+                "Informe de Registros de Producción",
+                "==================================",
+                f"Máquina: {machine or 'Todas'}",
+                f"Material: {material or 'Todos'}",
+                f"Período: {period}",
+                f"Total de Registros: {len(records)}",
+                "",
+                "Resumen Ejecutivo",
+                "----------------",
+                f"Se analizaron {len(records)} registros de producción para la máquina '{machine or 'Todas'}' "
+                f"y el material '{material or 'Todos'}' en el período {period}. "
+                "El informe incluye detalles de cada registro, estadísticas de métricas y recomendaciones.",
+                "",
+                "Detalles de Registros",
+                "--------------------"
             ]
             
-            # Format individual records
-            for record in records:
+            for i, record in enumerate(records, 1):
                 report.append(
-                    f"\n[Record ID: {record['transaction_id']}]"
-                    f"\nDate/Time: {record['timestamp']}"
-                    f"\nMachine: {record['equipment']}"
-                    f"\nOperator: {record['operator']}"
-                    f"\nProduction: {record['production_metrics']['quantity']} units of {record['production_metrics']['product_type']}"
-                    f"\nSensor Readings:"
-                    f"\n- Temperature: {record['sensor_data']['temperature']}°C (Limit: {record['contextual_info']['compliance_rules']['temperature_limit']}°C)"
-                    f"\n- Pressure: {record['sensor_data']['pressure']} psi (Limit: {record['contextual_info']['compliance_rules']['pressure_limit']} psi)"
-                    f"\n- Vibration: {record['sensor_data']['vibration']} mm/s"
-                    f"\nProcess Notes: {record['contextual_info']['compliance_rules'].get('process_notes', 'None')}"
+                    f"Registro {i}:\n"
+                    f"  ID: {record['id']}\n"
+                    f"  Fecha: {record['date']}\n"
+                    f"  Máquina: {record['machine']}\n"
+                    f"  Línea de Producción: {record['production_line']}\n"
+                    f"  Material: {record['material']}\n"
+                    f"  Tiempo Activo: {record['uptime']}%\n"
+                    f"  Defectos: {record['defects']}\n"
+                    f"  Tipo de Defecto: {record['defect_type']}\n"
+                    f"  Vibración: {record['vibration']} mm/s\n"
+                    f"  Temperatura: {record['temperature']}°C\n"
+                    f"  Rendimiento: {record['throughput']} unidades/h\n"
+                    f"  Nivel de Inventario: {record['inventory_level']} unidades\n"
                 )
             
-            # Add statistical summary
-            temp_readings = [r['sensor_data']['temperature'] for r in records]
-            pressure_readings = [r['sensor_data']['pressure'] for r in records]
-            
-            report.append("\nSTATISTICAL SUMMARY:")
-            report.append(f"- Temperature Range: {min(temp_readings)}°C to {max(temp_readings)}°C")
-            report.append(f"- Pressure Range: {min(pressure_readings)} to {max(pressure_readings)} psi")
-            report.append(f"- Unique Products: {len({r['production_metrics']['product_type'] for r in records})}")
-            report.append(f"- Operators Involved: {len({r['operator'] for r in records})}")
+            report.extend([
+                "Estadísticas",
+                "------------",
+                "Tiempo Activo (%):",
+                f"  - Mínimo: {min([r['uptime'] for r in records]):.2f}%",
+                f"  - Máximo: {max([r['uptime'] for r in records]):.2f}%",
+                f"  - Promedio: {statistics.mean([r['uptime'] for r in records]):.2f}%",
+                "Defectos:",
+                f"  - Mínimo: {min([r['defects'] for r in records])}",
+                f"  - Máximo: {max([r['defects'] for r in records])}",
+                f"  - Promedio: {statistics.mean([r['defects'] for r in records]):.2f}",
+                "Vibración (mm/s):",
+                f"  - Mínimo: {min([r['vibration'] for r in records]):.2f}",
+                f"  - Máximo: {max([r['vibration'] for r in records]):.2f}",
+                f"  - Promedio: {statistics.mean([r['vibration'] for r in records]):.2f}",
+                "Temperatura (°C):",
+                f"  - Mínimo: {min([r['temperature'] for r in records]):.2f}",
+                f"  - Máximo: {max([r['temperature'] for r in records]):.2f}",
+                f"  - Promedio: {statistics.mean([r['temperature'] for r in records]):.2f}",
+                "Rendimiento (unidades/h):",
+                f"  - Mínimo: {min([r['throughput'] for r in records]):.2f}",
+                f"  - Máximo: {max([r['throughput'] for r in records]):.2f}",
+                f"  - Promedio: {statistics.mean([r['throughput'] for r in records]):.2f}",
+                "Nivel de Inventario (unidades):",
+                f"  - Mínimo: {min([r['inventory_level'] for r in records])}",
+                f"  - Máximo: {max([r['inventory_level'] for r in records])}",
+                f"  - Promedio: {statistics.mean([r['inventory_level'] for r in records]):.2f}",
+                f"Materiales Únicos: {len({r['material'] for r in records})}",
+                f"Líneas de Producción Únicas: {len({r['production_line'] for r in records})}",
+                "",
+                "Recomendaciones",
+                "--------------",
+                "1. Monitorear regularmente las métricas para detectar tendencias anómalas.",
+                "2. Asegurarse de que los datos de producción se registren correctamente.",
+                "3. Optimizar el tiempo activo y reducir defectos mediante mantenimiento preventivo."
+            ])
             
             return "\n".join(report)
             
         except httpx.RequestError as e:
-            logger.error(f"API request failed: {str(e)}")
-            return "Error retrieving data from production API"
-        except Exception as e:
-            logger.error(f"Unexpected error: {str(e)}")
-            return "Error processing production records"
-
-
-
-
-
-@mcp.tool()
-async def equipment_status(
-    ctx: Context, 
-    equipment: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
-) -> str:
-    """Obtiene el estado del equipo con filtros temporales."""
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
-    try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    endpoint = f"{API_URL}/machines/{equipment}"
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(endpoint, params=params)
-            if response.status_code == 404:
-                return f"Equipo {equipment} no encontrado"
-            
-            machines = response.json()
-            if not machines:
-                return f"No se encontraron datos para {equipment}"
-            
-            # Validar que sea una lista
-            if not isinstance(machines, list):
-                machines = [machines]
-            
-            report = ["🏭 Estado del Equipamiento:"]
-            for machine in machines:
-                # Validar campos esenciales
-                required_fields = {
-                    'equipment': str,
-                    'production_metrics': dict,
-                    'sensor_data': dict,
-                    'contextual_info': dict,
-                    'operator': str,
-                    'timestamp': str
-                }
-                
-                missing_fields = []
-                for field, field_type in required_fields.items():
-                    if field not in machine or not isinstance(machine[field], field_type):
-                        missing_fields.append(field)
-                
-                if missing_fields:
-                    logger.error(f"Datos incompletos para {equipment}: Faltan {missing_fields}")
-                    continue
-                
-                # Construir reporte
-                status = (
-                    f"\n🔧 {machine['equipment']} ({machine['production_metrics']['product_type']})"
-                    f"\n- Operador: {machine['operator']}"
-                    f"\n- Producción: {machine['production_metrics']['quantity']} unidades"
-                    f"\n- Sensores:"
-                    f"\n  • Temperatura: {machine['sensor_data']['temperature']}°C (Límite: {machine['contextual_info']['compliance_rules']['temperature_limit']}°C)"
-                    f"\n  • Presión: {machine['sensor_data']['pressure']} psi (Límite: {machine['contextual_info']['compliance_rules']['pressure_limit']} psi)"
-                    f"\n  • Vibración: {machine['sensor_data']['vibration']} mm/s"
-                    f"\n- Última actualización: {machine['timestamp']}"
-                    f"\n- Notas: {machine['contextual_info']['compliance_rules'].get('process_notes', 'Ninguna')}"
-                )
-                report.append(status)
-                
-                # Generar alertas
-                alerts = []
-                sensor_data = machine['sensor_data']
-                rules = machine['contextual_info']['compliance_rules']
-                
-                if sensor_data['temperature'] > rules['temperature_limit']:
-                    alerts.append(f"🚨 ALERTA: Temperatura ({sensor_data['temperature']}°C) excede el límite ({rules['temperature_limit']}°C)")
-                
-                if sensor_data['pressure'] > rules['pressure_limit']:
-                    alerts.append(f"🚨 ALERTA: Presión ({sensor_data['pressure']} psi) excede el límite ({rules['pressure_limit']} psi)")
-                
-                if sensor_data['vibration'] > 3.5:  # Límite genérico para vibración
-                    alerts.append(f"⚠️ ADVERTENCIA: Vibración elevada ({sensor_data['vibration']} mm/s)")
-                
-                if alerts:
-                    report.append("\n" + "\n".join(alerts))
-            
-            return "\n".join(report)
-            
-        except httpx.RequestError as e:
-            logger.error(f"Error de conexión: {str(e)}")
-            return f"Error al conectar con la API: {str(e)}"
+            logger.error(f"Error en la solicitud API: {str(e)}")
+            return (
+                "Informe de Registros de Producción\n"
+                "================================\n"
+                f"Error: No se pudieron recuperar datos de la API de producción.\n"
+                f"Detalles: {str(e)}\n"
+                "Recomendación: Verifique la conexión con la API o contacte al equipo de soporte técnico."
+            )
         except Exception as e:
             logger.error(f"Error inesperado: {str(e)}")
-            return f"Error al procesar los datos: {str(e)}"
+            return (
+                "Informe de Registros de Producción\n"
+                "================================\n"
+                f"Error: Ocurrió un problema al procesar los registros de producción.\n"
+                f"Detalles: {str(e)}\n"
+                "Recomendación: Contacte al equipo de soporte técnico para diagnosticar el problema."
+            )
 
 @mcp.tool()
-async def production_dashboard(
+async def read_pdf(
+    ctx: Context,
+    machine: Optional[str] = None
+) -> str:
+    """
+    Genera un informe con el contenido extraído de un PDF relevante para la máquina especificada.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            pdf_list_response = await client.get(f"{API_URL}/pdfs/list")
+            pdf_list = pdf_list_response.json()
+
+            if not pdf_list:
+                return (
+                    "Informe de Contenido de PDF\n"
+                    "==========================\n"
+                    "Error: No hay PDFs disponibles en el sistema.\n"
+                    "Recomendación: Cargue los manuales técnicos de las máquinas como PDFs en el sistema.\n"
+                    "Sugerencia: Asegúrese de incluir un archivo con un nombre como 'NombreDeLaMáquina.pdf' (por ejemplo, 'ModelA.pdf')."
+                )
+
+            top_pdf = None
+            if machine:
+                exact_match = next((pdf for pdf in pdf_list if pdf['filename'].lower() == f"{machine.lower()}.pdf"), None)
+                if exact_match:
+                    top_pdf = exact_match['filename']
+                    logger.info(f"Encontrado PDF exacto para {machine}: {top_pdf}")
+                else:
+                    pdf_scores = []
+                    machine_embedding = model.encode(machine, convert_to_tensor=True)
+                    for pdf in pdf_list:
+                        text_to_embed = f"{pdf['filename']} {pdf['description']}"
+                        pdf_embedding = model.encode(text_to_embed, convert_to_tensor=True)
+                        similarity = util.pytorch_cos_sim(machine_embedding, pdf_embedding).item()
+                        pdf_scores.append((pdf['filename'], similarity))
+                    
+                    logger.debug(f"Puntajes de similitud para {machine}: {pdf_scores}")
+                    pdf_scores.sort(key=lambda x: x[1], reverse=True)
+                    top_pdf = pdf_scores[0][0] if pdf_scores and pdf_scores[0][1] > 0.3 else None
+            
+            if not top_pdf and pdf_list:
+                top_pdf = pdf_list[0]['filename']
+            
+            if not top_pdf:
+                available_pdfs = [pdf['filename'] for pdf in pdf_list]
+                return (
+                    "Informe de Contenido de PDF\n"
+                    "==========================\n"
+                    f"Error: No se encontraron PDFs relevantes para la máquina '{machine}'.\n"
+                    f"PDFs disponibles en el sistema: {', '.join(available_pdfs) if available_pdfs else 'Ninguno'}.\n"
+                    "Recomendación: Cargue el manual técnico de la máquina como PDF en el sistema.\n"
+                    f"Sugerencia: Use un nombre como '{machine}.pdf' para facilitar la identificación."
+                )
+
+            content_response = await client.get(
+                f"{API_URL}/pdfs/content/",
+                params={"filenames": [top_pdf]}
+            )
+            if content_response.status_code != 200:
+                return (
+                    "Informe de Contenido de PDF\n"
+                    "==========================\n"
+                    f"Error: No se pudo obtener el contenido del PDF '{top_pdf}'.\n"
+                    f"Detalles: {content_response.text}\n"
+                    "Recomendación: Verifique la disponibilidad del archivo en el sistema o contacte al soporte técnico."
+                )
+
+            pdf_contents = content_response.json()
+            content = pdf_contents["pdfs"][0]["content"]
+            
+            report = [
+                "Informe de Contenido de PDF",
+                "==========================",
+                f"Máquina: {machine or 'No especificada'}",
+                f"Archivo PDF: {top_pdf}",
+                "",
+                "Resumen Ejecutivo",
+                "----------------",
+                f"Se extrajo el contenido del manual técnico '{top_pdf}' asociado a la máquina '{machine or 'No especificada'}'. "
+                f"El contenido incluye especificaciones técnicas y reglas de cumplimiento relevantes.",
+                "",
+                "Contenido Extraído",
+                "-----------------",
+                content,
+                "",
+                "Recomendaciones",
+                "--------------",
+                "1. Asegúrese de que el PDF contenga las reglas de cumplimiento en el formato correcto (por ejemplo, 'temperature <= 80°C, vibration <= 1.0 mm/s, defects <= 2, uptime >= 90%').",
+                "2. Verifique que el manual esté actualizado con las especificaciones más recientes de la máquina.",
+                "3. Si el contenido es extenso, considere dividir el PDF en secciones para facilitar su procesamiento."
+            ]
+            
+            return "\n".join(report)
+            
+    except Exception as e:
+        logger.error(f"No se pudo leer el PDF para la máquina '{machine}': {str(e)}")
+        return (
+            "Informe de Contenido de PDF\n"
+            "==========================\n"
+            f"Error: No se pudo leer el PDF para la máquina '{machine}'.\n"
+            f"Detalles: {str(e)}\n"
+            "Recomendación: Contacte al equipo de soporte técnico para diagnosticar el problema.\n"
+            f"Sugerencia: Asegúrese de que el archivo '{machine}.pdf' esté cargado y sea accesible."
+        )
+
+@mcp.tool()
+async def check_temperature_compliance(
     ctx: Context,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
+    """
+    Verifica el cumplimiento de la temperatura para todas las máquinas contra los límites definidos en los manuales técnicos (PDF).
+    """
     try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/", params=params)
-        machines = response.json()
-        
-        # Resto del código original SIN CAMBIOS
-        if not machines:
-            return "No hay datos de producción disponibles"
-        
-        total_production = sum(m["production_metrics"]["quantity"] for m in machines)
-        unique_products = {m["production_metrics"]["product_type"] for m in machines}
-        active_equipment = {m["equipment"] for m in machines}
-        avg_temp = statistics.mean(m["sensor_data"]["temperature"] for m in machines)
-        
-        rules = machines[0]["contextual_info"]["compliance_rules"]
-        return f"""
-        📊 Dashboard de Producción:
-        - Total producido: {total_production} unidades
-        - Tipos de producto: {len(unique_products)} ({', '.join(unique_products)})
-        - Equipos activos: {len(active_equipment)}
-        - Temperatura promedio: {avg_temp:.1f}°C (Límite típico: {rules['temperature_limit']}°C)
-        - Normas de cumplimiento relevantes:
-          - Límite de presión: {rules['pressure_limit']} psi
-          - Límite de temperatura: {rules['temperature_limit']}°C
-          - Certificación de operador: {'Requerida' if rules['operator_certification_required'] else 'No requerida'}
-          - Notas de proceso: {rules['process_notes']}
-        
-        💡 CONTEXTO PARA EL LLM: Analizar relación entre promedios y límites operativos. 
-        Alertar si temperatura promedio está dentro del 10% del límite ({rules['temperature_limit']}°C) 
-        o presión promedio dentro del 10% del límite ({rules['pressure_limit']} psi). 
-        Considerar contexto de certificación y notas operativas.
-        """
-
-# =============================================
-# HERRAMIENTAS DE ANÁLISIS DE PRODUCCIÓN
-# =============================================
-
-
-
-@mcp.tool()
-async def product_analysis(
-    ctx: Context, 
-    product_type: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
-) -> str:
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
-    try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/", params=params)
-        machines = [m for m in response.json() if m["production_metrics"]["product_type"].lower() == product_type.lower()]
-        
-        # Resto del código original SIN CAMBIOS
-        if not machines:
-            return f"No hay datos para el producto {product_type}"
-        
-        total = sum(m["production_metrics"]["quantity"] for m in machines)
-        equipment_count = len({m["equipment"] for m in machines})
-        avg_per_batch = total / len(machines)
-        temps = [m["sensor_data"]["temperature"] for m in machines]
-        avg_temp = statistics.mean(temps)
-        rules = machines[0]["contextual_info"]["compliance_rules"]
-        
-        return f"""
-        🍞 Análisis de {product_type}:
-        - Total producido: {total} unidades
-        - Lotes registrados: {len(machines)}
-        - Equipos utilizados: {equipment_count}
-        - Promedio por lote: {avg_per_batch:.1f} unidades
-        - Temperatura promedio: {avg_temp:.1f}°C (Límite: {rules['temperature_limit']}°C)
-        - Contexto de cumplimiento:
-          - Límite de presión: {rules['pressure_limit']} psi
-          - Notas operativas: {rules['process_notes']}
-        
-        💡 CONTEXTO PARA EL LLM: Evaluar si la producción de {product_type} opera dentro de parámetros seguros. 
-        Alertar si temperatura promedio ({avg_temp:.1f}°C) se acerca al límite ({rules['temperature_limit']}°C) 
-        o si hay variaciones significativas entre equipos. Considerar notas operativas en el análisis.
-        """
-
-@mcp.tool()
-async def equipment_productivity(
-    ctx: Context, 
-    equipment: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
-) -> str:
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
-    try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
-        records = response.json()
-        
-        # Resto del código original SIN CAMBIOS
-        if not records:
-            return f"No hay datos para {equipment}"
-        
-        product_stats = {}
-        for record in records:
-            product = record["production_metrics"]["product_type"]
-            if product not in product_stats:
-                product_stats[product] = {
-                    'total': 0,
-                    'count': 0,
-                    'last_production': record["timestamp"]
-                }
-            product_stats[product]['total'] += record["production_metrics"]["quantity"]
-            product_stats[product]['count'] += 1
-            if record["timestamp"] > product_stats[product]['last_production']:
-                product_stats[product]['last_production'] = record["timestamp"]
-        
-        report = [f"📈 Productividad de {equipment}:"]
-        for product, stats in product_stats.items():
-            report.append(
-                f"\n📦 {product}:"
-                f"\n- Total: {stats['total']} unidades"
-                f"\n- Lotes: {stats['count']}"
-                f"\n- Promedio: {stats['total']/stats['count']:.1f} unidades/lote"
-                f"\n- Última producción: {stats['last_production'][:10]}"
-            )
-        
-        rules = records[0]["contextual_info"]["compliance_rules"]
-        report.append(
-            f"\n📜 Contexto operativo:"
-            f"\n- Temperatura máxima permitida: {rules['temperature_limit']}°C"
-            f"\n- Presión máxima permitida: {rules['pressure_limit']} psi"
-            f"\n- Notas: {rules['process_notes']}"
-            f"\n\n💡 CONTEXTO PARA EL LLM: Analizar productividad en relación con límites operativos. "
-            f"Alertar si alta productividad coincide con valores cercanos a límites de temperatura/presión. "
-            f"Considerar que operador puede estar en entrenamiento: {rules['process_notes']}"
+        time_filter = TimeFilter(
+            start_date=start_date,
+            end_date=end_date,
+            specific_date=specific_date
         )
+        try:
+            time_filter.validate_dates()
+        except ValueError as e:
+            return (
+                "Informe de Cumplimiento de Temperatura para Todas las Máquinas\n"
+                "===========================================================\n"
+                f"Error: Error en parámetros de fecha: {str(e)}.\n"
+                "Recomendación: Use fechas en formato YYYY-MM-DD (por ejemplo, '2025-04-01')."
+            )
+
+        endpoint = f"{API_URL}/machines/"
+        params = {}
+        if time_filter.specific_date:
+            params["specific_date"] = time_filter.specific_date
+        else:
+            if time_filter.start_date:
+                params["start_date"] = time_filter.start_date
+            if time_filter.end_date:
+                params["end_date"] = time_filter.end_date
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(endpoint, params=params)
+                logs = response.json()
+                if not logs:
+                    return (
+                        "Informe de Cumplimiento de Temperatura para Todas las Máquinas\n"
+                        "===========================================================\n"
+                        f"Período: {time_filter.specific_date or f'{time_filter.start_date} a {time_filter.end_date}'}\n"
+                        "Resultado: No se encontraron registros.\n"
+                        "Recomendación: Verifique si las máquinas estuvieron operativas durante el período especificado."
+                    )
+            except httpx.RequestError as e:
+                logger.error(f"Error en la solicitud API: {str(e)}")
+                return (
+                    "Informe de Cumplimiento de Temperatura para Todas las Máquinas\n"
+                    "===========================================================\n"
+                    f"Error: No se pudieron recuperar datos de la API.\n"
+                    f"Detalles: {str(e)}\n"
+                    "Recomendación: Verifique la conexión con la API o contacte al equipo de soporte técnico."
+                )
+
+        machines = sorted(set(log["machine"] for log in logs))
+        if not machines:
+            return (
+                "Informe de Cumplimiento de Temperatura para Todas las Máquinas\n"
+                "===========================================================\n"
+                "Error: No se encontraron máquinas en los registros.\n"
+                "Recomendación: Asegúrese de que los datos de producción estén registrados."
+            )
+
+        results = {}
+        pdf_cache = {}
+        total_records = 0
+
+        for machine in machines:
+            machine_logs = [log for log in logs if log["machine"] == machine]
+            if not machine_logs:
+                continue
+
+            if machine not in pdf_cache:
+                pdf_result = await read_pdf(ctx, machine=machine)
+                if "Error:" in pdf_result:
+                    results[machine] = {
+                        "error": pdf_result.split("Error: ")[1].split("\n")[0],
+                        "recommendation": "Cargue el manual técnico de la máquina como PDF en el sistema."
+                    }
+                    continue
+                pdf_cache[machine] = pdf_result.split("Contenido Extraído\n-----------------\n")[1].split("\n\nRecomendaciones\n--------------")[0]
+
+            compliance_text = pdf_cache[machine]
+            
+            temp_limit = 80.0
+            rules_match = re.search(
+                r"temperature\s*[<≤=]+\s*(\d+\.?\d*)\s*(?:°C|C)",
+                compliance_text,
+                re.IGNORECASE
+            )
+            if rules_match:
+                temp_limit = float(rules_match.group(1))
+                logger.info(f"Límite de temperatura extraído del PDF para {machine}: temperature <= {temp_limit}°C")
+            else:
+                logger.warning(f"No se encontró el límite de temperatura en el PDF de {machine}. Usando valor por defecto: {temp_limit}°C")
+                warning_message = (
+                    f"Advertencia: No se encontró el límite de temperatura en el PDF de {machine}. Usando valor por defecto: <= {temp_limit}°C\n"
+                    f"Contenido del PDF:\n{compliance_text}\n"
+                    "Recomendación: Verifique que el PDF contenga la regla de temperatura en el formato esperado."
+                )
+
+            compliance_report = []
+            non_compliant_count = 0
+            for log in machine_logs:
+                issue = None
+                if log["temperature"] > temp_limit:
+                    issue = f"Temperatura: {log['temperature']}°C excede el límite de {temp_limit}°C"
+                    non_compliant_count += 1
+                
+                compliance_report.append({
+                    "id": log["id"],
+                    "date": log["date"],
+                    "machine": log["machine"],
+                    "production_line": log["production_line"],
+                    "material": log["material"],
+                    "metrics": {
+                        "uptime": log["uptime"],
+                        "defects": log["defects"],
+                        "vibration": log["vibration"],
+                        "temperature": log["temperature"],
+                        "throughput": log["throughput"],
+                        "inventory_level": log["inventory_level"]
+                    },
+                    "defect_type": log["defect_type"],
+                    "compliant": not issue,
+                    "issue": issue
+                })
+
+            results[machine] = {
+                "compliance_report": compliance_report,
+                "non_compliant_count": non_compliant_count,
+                "temp_limit": temp_limit,
+                "rules_found": bool(rules_match),
+                "warning_message": warning_message if not rules_match else None
+            }
+            total_records += len(compliance_report)
+
+        period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+        report = [
+            "Informe de Cumplimiento de Temperatura para Todas las Máquinas",
+            "===========================================================",
+            f"Período: {period}",
+            f"Total de Máquinas Analizadas: {len(machines)}",
+            f"Total de Registros Analizados: {total_records}",
+            "",
+            "Detalles por Máquina",
+            "------------------"
+        ]
+
+        for machine, data in results.items():
+            if "error" in data:
+                report.append(
+                    f"Máquina: {machine}\n"
+                    f"  Error: {data['error']}\n"
+                    f"  Recomendación: {data['recommendation']}\n"
+                )
+                continue
+            
+            report.append(
+                f"Máquina: {machine}\n"
+                f"  Total de Registros: {len(data['compliance_report'])}\n"
+                f"  Límite Aplicado: Temperatura <= {data['temp_limit']}°C\n"
+            )
+            if not data["rules_found"]:
+                report.append(data["warning_message"] + "\n")
+            
+            report.append("  Detalles de Registros:\n")
+            for i, entry in enumerate(data["compliance_report"], 1):
+                status = "Conforme" if entry["compliant"] else "No Conforme"
+                issue_text = f"    - {entry['issue']}" if entry["issue"] else "    Ninguno"
+                report.append(
+                    f"    Registro {i}:\n"
+                    f"      ID: {entry['id']}\n"
+                    f"      Fecha: {entry['date']}\n"
+                    f"      Máquina: {entry['machine']}\n"
+                    f"      Línea de Producción: {entry['production_line']}\n"
+                    f"      Material: {entry['material']}\n"
+                    f"      Métricas:\n"
+                    f"        - Tiempo Activo: {entry['metrics']['uptime']}%\n"
+                    f"        - Defectos: {entry['metrics']['defects']}\n"
+                    f"        - Vibración: {entry['metrics']['vibration']} mm/s\n"
+                    f"        - Temperatura: {entry['metrics']['temperature']}°C\n"
+                    f"        - Rendimiento: {entry['metrics']['throughput']} unidades/h\n"
+                    f"        - Nivel de Inventario: {entry['metrics']['inventory_level']} unidades\n"
+                    f"      Tipo de Defecto: {entry['defect_type']}\n"
+                    f"      Estado: {status}\n"
+                    f"      Problema Detectado:\n{issue_text}\n"
+                )
+            
+            report.append(
+                f"  Resumen:\n"
+                f"    Registros No Conformes: {data['non_compliant_count']}\n"
+            )
+
+        report.extend([
+            "Instrucciones",
+            "------------",
+            f"Se verificaron {total_records} registros de producción de {len(machines)} máquinas para el período {period} contra los límites de temperatura definidos en los manuales técnicos (PDF). "
+            f"Los registros listados como 'No Conforme' exceden los límites de temperatura especificados para cada máquina. "
+            "Por favor, revise los registros no conformes detallados arriba para identificar las causas de las desviaciones y tomar acciones correctivas, como verificar los sistemas de enfriamiento o recalibrar los sensores de temperatura."
+        ])
         
         return "\n".join(report)
-
-# =============================================
-# HERRAMIENTAS DE ANÁLISIS PREDICTIVO
-# =============================================
-
-@mcp.tool()
-async def predict_production(
-    ctx: Context, 
-    product_type: str, 
-    hours: int,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
-) -> str:
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
-    try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/", params=params)
-        relevant_records = [
-            r for r in response.json() 
-            if r["production_metrics"]["product_type"].lower() == product_type.lower()
-        ]
         
-        # Resto del código original SIN CAMBIOS
-        if len(relevant_records) < 5:
-            return f"Insuficientes datos para {product_type} (mínimo 5 registros)"
-        
-        production_data = []
-        equipment_stats = {}
-        
-        for r in relevant_records:
-            record = {
-                "time": r["timestamp"],
-                "equipment": r["equipment"],
-                "quantity": r["production_metrics"]["quantity"],
-                "operator": r["operator"],
-                "conditions": {
-                    "temp": r["sensor_data"]["temperature"],
-                    "pressure": r["sensor_data"]["pressure"]
-                }
-            }
-            production_data.append(record)
-            if r["equipment"] not in equipment_stats:
-                equipment_stats[r["equipment"]] = []
-            equipment_stats[r["equipment"]].append(r["production_metrics"]["quantity"])
-        
-        rules = relevant_records[0]["contextual_info"]["compliance_rules"]
-        
-        all_records = "\n".join(
-            f"Fecha del registro: {d['time']} | Equipo: {d['equipment']} | Operador de la maquina {d['operator']} | "
-            f"Unidades producidad {d['quantity']} unidades | Temperatura de la maquina en funcionamiento {d['conditions']['temp']}°C | "
-            f"Presion de la maquina {d['conditions']['pressure']} psi,"
-            for d in production_data
+    except Exception as e:
+        logger.error(f"No se pudo verificar el cumplimiento de temperatura para las máquinas: {str(e)}")
+        return (
+            "Informe de Cumplimiento de Temperatura para Todas las Máquinas\n"
+            "===========================================================\n"
+            f"Error: No se pudo verificar el cumplimiento de temperatura para las máquinas.\n"
+            f"Detalles: {str(e)}\n"
+            "Recomendación: Contacte al equipo de soporte técnico para diagnosticar el problema."
         )
-        
-        return f"""
-        📈 PREDICCIÓN DE PRODUCCIÓN - {product_type.upper()}
-        ⏳ Período: Próximas {hours} horas
-        📊 Registros completos ({len(relevant_records)}):
-        
-        {all_records}
-        
-        ⚠️ LÍMITES OPERATIVOS:
-        • Temperatura máxima: {rules['temperature_limit']}°C
-        • Presión máxima: {rules['pressure_limit']} psi
-        • Notas: {rules['process_notes']}
-        
-        💡 INSTRUCCIONES PARA EL LLM:
-        Analizar todos los registros mostrados y predecir producción considerando:
-        1. Patrones históricos completos
-        2. Límites operativos
-        3. Variación entre equipos
-        4. Contexto operacional
-        """
 
 @mcp.tool()
-async def predict_temperature(
-    ctx: Context, 
-    equipment: str, 
-    hours: int,
+async def check_vibration_compliance(
+    ctx: Context,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
+    """
+    Verifica el cumplimiento de la vibración para todas las máquinas contra los límites definidos en los manuales técnicos (PDF).
+    """
     try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
-        records = response.json()
-        
-        # Resto del código original SIN CAMBIOS
-        if len(records) < 5:
-            return f"Insuficientes datos para {equipment} (mínimo 5 registros)"
-        
-        temp_data = []
-        for r in records:
-            temp_data.append({
-                "time": r["timestamp"],
-                "operator": r["operator"],
-                "temperature": r["sensor_data"]["temperature"],
-                "pressure": r["sensor_data"]["pressure"],
-                "vibration": r["sensor_data"]["vibration"],
-                "production": r["production_metrics"]["quantity"]
-            })
-        
-        rules = records[0]["contextual_info"]["compliance_rules"]
-        
-        all_readings = "\n".join(
-            f"Fecha de registro de la maquina {d['time']} | Operador Maquina{d['operator']} |Temperatura de la maquina {d['temperature']}°C | Presion de la maquina {d['pressure']} psi | "
-            f"Vibracion de la maquina {d['vibration']} mm/s | Producion de la maquina {d['production']} unidades,"
-            for d in temp_data
+        time_filter = TimeFilter(
+            start_date=start_date,
+            end_date=end_date,
+            specific_date=specific_date
         )
-        
-        return f"""
-        🌡️ PREDICCIÓN DE TEMPERATURA - {equipment.upper()}
-        ⏳ Período: Próximas {hours} horas
-        📊 Registros completos ({len(records)}):
-        
-        {all_readings}
-        
-        ⚠️ LÍMITES OPERATIVOS:
-        • Temperatura máxima: {rules['temperature_limit']}°C
-        • Presión máxima: {rules['pressure_limit']} psi
-        • Notas: {rules['process_notes']}
-        
-        💡 INSTRUCCIONES PARA EL LLM:
-        Analizar todos los registros mostrados y predecir temperatura considerando:
-        1. Tendencia histórica completa
-        2. Correlación con presión y producción
-        3. Límites operativos
-        4. Patrones de vibración
-        """
-
-@mcp.tool()
-async def predict_maintenance(
-    ctx: Context, 
-    equipment: str, 
-    horizon_hours: int,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
-) -> str:
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
-    try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
-        records = response.json()
-        
-        # Resto del código original SIN CAMBIOS
-        if len(records) < 10:
-            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
-        
-        maintenance_data = []
-        for r in records:
-            maintenance_data.append({
-                "time": r["timestamp"],
-                "operator": r["operator"],
-                "sensors": {
-                    "temp": r["sensor_data"]["temperature"],
-                    "pressure": r["sensor_data"]["pressure"],
-                    "vibration": r["sensor_data"]["vibration"]
-                },
-                "production": {
-                    "quantity": r["production_metrics"]["quantity"],
-                    "type": r["production_metrics"]["product_type"]
-                }
-            })
-        
-        rules = records[0]["contextual_info"]["compliance_rules"]
-        
-        all_maintenance = "\n".join(
-            f"Fecha del registro {d['time']} | Temperatura de la maquina {d['sensors']['temp']}°C | Operador de la maquina {d['operator']} |Presion de la maquina {d['sensors']['pressure']} psi | "
-            f"Vibracion de la maquina {d['sensors']['vibration']} mm/s | Producion de la maquina {d['production']['quantity']} tipo de producion {d['production']['type']},"
-            for d in maintenance_data
-        )
-        
-        return f"""
-        🛠️ PREDICCIÓN DE MANTENIMIENTO - {equipment.upper()}
-        ⏳ Horizonte: Próximas {horizon_hours} horas
-        📊 Registros completos ({len(records)}):
-        
-        {all_maintenance}
-        
-        ⚠️ LÍMITES OPERATIVOS:
-        • Temperatura máxima: {rules['temperature_limit']}°C
-        • Presión máxima: {rules['pressure_limit']} psi
-        • Notas: {rules['process_notes']}
-        
-        💡 INSTRUCCIONES PARA EL LLM:
-        Analizar todos los registros mostrados y predecir mantenimiento considerando:
-        1. Patrones completos de desgaste
-        2. Historial de valores de sensores
-        3. Relación con producción
-        4. Límites operativos
-        5. Contexto de operación
-        """
-
-
-@mcp.tool()
-async def analyze_equipment_patterns(
-    ctx: Context, 
-    equipment: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
-) -> str:
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
-    try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
-        records = response.json()
-        
-        # Resto del código original SIN CAMBIOS
-        if len(records) < 10:
-            return f"Insuficientes datos para {equipment} (mínimo 10 registros)"
-        
-        temps = [r["sensor_data"]["temperature"] for r in records]
-        pressures = [r["sensor_data"]["pressure"] for r in records]
-        vibes = [r["sensor_data"]["vibration"] for r in records]
-        productions = [r["production_metrics"]["quantity"] for r in records]
-        
-        rules = records[0]["contextual_info"]["compliance_rules"]
-        
-        stats = {
-            "temperature": {
-                "min": min(temps),
-                "max": max(temps),
-                "avg": statistics.mean(temps),
-                "limit": rules["temperature_limit"],
-                "over_limit_count": sum(1 for t in temps if t > rules["temperature_limit"])
-            },
-            "pressure": {
-                "min": min(pressures),
-                "max": max(pressures),
-                "avg": statistics.mean(pressures),
-                "limit": rules["pressure_limit"],
-                "over_limit_count": sum(1 for p in pressures if p > rules["pressure_limit"])
-            },
-            "vibration": {
-                "min": min(vibes),
-                "max": max(vibes),
-                "avg": statistics.mean(vibes)
-            },
-            "production": {
-                "min": min(productions),
-                "max": max(productions),
-                "avg": statistics.mean(productions)
-            },
-            "time_range": {
-                "start": min(r["timestamp"] for r in records),
-                "end": max(r["timestamp"] for r in records)
-            }
-        }
-        
-        return f"""
-        🔍 Análisis de Patrones en {equipment}:
-        
-        **ESTADÍSTICAS COMPLETAS:**
-        ```json
-        {json.dumps(stats, indent=2)}
-        ```
-        
-        **LÍMITES OPERATIVOS:**
-        - Temperatura máxima permitida: {rules['temperature_limit']}°C
-        - Presión máxima permitida: {rules['pressure_limit']} psi
-        - Notas operativas: {rules['process_notes']}
-        
-        **INSTRUCCIONES PARA EL LLM:**
-        1. Analizar las estadísticas proporcionadas
-        2. Identificar correlaciones entre variables
-        3. Detectar patrones temporales
-        4. Evaluar violaciones a límites operativos
-        5. Proponer recomendaciones basadas en los datos
-        6. Considerar el contexto operacional proporcionado
-        """
-
-# =============================================
-# HERRAMIENTAS DE DOCUMENTACIÓN (RAG)
-# =============================================
-
-@mcp.tool()
-async def get_pdf_data(ctx: Context, request: str) -> str:
-    """Busca en PDFs relevantes para la consulta"""
-    async with httpx.AsyncClient() as client:
         try:
-            # 1. Obtener lista de PDFs disponibles
-            pdf_list_response = await client.get(f"{API_URL}/pdfs/list")
-            pdf_list = pdf_list_response.json()
-            
-            if not pdf_list:
-                return "No hay PDFs disponibles en el sistema."
-
-            # 2. Seleccionar los más relevantes
-            model = SentenceTransformer('all-MiniLM-L6-v2')
-            request_embedding = model.encode(request, convert_to_tensor=True)
-            
-            pdf_scores = []
-            for pdf in pdf_list:
-                text_to_embed = f"{pdf['filename']} {pdf['description']}"
-                pdf_embedding = model.encode(text_to_embed, convert_to_tensor=True)
-                similarity = util.pytorch_cos_sim(request_embedding, pdf_embedding).item()
-                pdf_scores.append((pdf['filename'], similarity))
-            
-            # Ordenar y filtrar por relevancia
-            pdf_scores.sort(key=lambda x: x[1], reverse=True)
-            top_pdfs = [pdf[0] for pdf in pdf_scores[:2] if pdf[1] > 0.5]
-
-            if not top_pdfs:
-                return f"No se encontraron PDFs relevantes para: '{request}'"
-
-            # 3. Obtener contenidos
-            content_response = await client.get(
-                f"{API_URL}/pdfs/content/",
-                params={"filenames": top_pdfs}
+            time_filter.validate_dates()
+        except ValueError as e:
+            return (
+                "Informe de Cumplimiento de Vibración para Todas las Máquinas\n"
+                "=========================================================\n"
+                f"Error: Error en parámetros de fecha: {str(e)}.\n"
+                "Recomendación: Use fechas en formato YYYY-MM-DD (por ejemplo, '2025-04-01')."
             )
-            
-            if content_response.status_code != 200:
-                return f"Error al obtener contenidos: {content_response.text}"
-            
-            pdf_contents = content_response.json()
-            
-            # 4. Preparar respuesta estructurada
-            context = {
-                "user_request": request,
-                "pdfs": pdf_contents["pdfs"],
-                "analysis_instructions": (
-                    "Analiza los documentos y responde considerando:\n"
-                    "1. Relevancia para la solicitud\n"
-                    "2. Datos técnicos encontrados\n"
-                    "3. Posibles acciones recomendadas"
-                )
-            }
-            
-            return json.dumps(context, indent=2)
-            
-        except Exception as e:
-            logger.error(f"Error en get_pdf_data: {str(e)}")
-            return f"Error al procesar la solicitud: {str(e)}"
 
-# =============================================
-# HERRAMIENTAS DE MANTENIMIENTO
-# =============================================
+        endpoint = f"{API_URL}/machines/"
+        params = {}
+        if time_filter.specific_date:
+            params["specific_date"] = time_filter.specific_date
+        else:
+            if time_filter.start_date:
+                params["start_date"] = time_filter.start_date
+            if time_filter.end_date:
+                params["end_date"] = time_filter.end_date
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(endpoint, params=params)
+                logs = response.json()
+                if not logs:
+                    return (
+                        "Informe de Cumplimiento de Vibración para Todas las Máquinas\n"
+                        "=========================================================\n"
+                        f"Período: {time_filter.specific_date or f'{time_filter.start_date} a {time_filter.end_date}'}\n"
+                        "Resultado: No se encontraron registros.\n"
+                        "Recomendación: Verifique si las máquinas estuvieron operativas durante el período especificado."
+                    )
+            except httpx.RequestError as e:
+                logger.error(f"Error en la solicitud API: {str(e)}")
+                return (
+                    "Informe de Cumplimiento de Vibración para Todas las Máquinas\n"
+                    "=========================================================\n"
+                    f"Error: No se pudieron recuperar datos de la API.\n"
+                    f"Detalles: {str(e)}\n"
+                    "Recomendación: Verifique la conexión con la API o contacte al equipo de soporte técnico."
+                )
+
+        machines = sorted(set(log["machine"] for log in logs))
+        if not machines:
+            return (
+                "Informe de Cumplimiento de Vibración para Todas las Máquinas\n"
+                "=========================================================\n"
+                "Error: No se encontraron máquinas en los registros.\n"
+                "Recomendación: Asegúrese de que los datos de producción estén registrados."
+            )
+
+        results = {}
+        pdf_cache = {}
+        total_records = 0
+
+        for machine in machines:
+            machine_logs = [log for log in logs if log["machine"] == machine]
+            if not machine_logs:
+                continue
+
+            if machine not in pdf_cache:
+                pdf_result = await read_pdf(ctx, machine=machine)
+                if "Error:" in pdf_result:
+                    results[machine] = {
+                        "error": pdf_result.split("Error: ")[1].split("\n")[0],
+                        "recommendation": "Cargue el manual técnico de la máquina como PDF en el sistema."
+                    }
+                    continue
+                pdf_cache[machine] = pdf_result.split("Contenido Extraído\n-----------------\n")[1].split("\n\nRecomendaciones\n--------------")[0]
+
+            compliance_text = pdf_cache[machine]
+            
+            vibration_limit = 1.0
+            rules_match = re.search(
+                r"vibration\s*[<≤=]+\s*(\d+\.?\d*)\s*(?:mm/s|mm\s*/\s*s)",
+                compliance_text,
+                re.IGNORECASE
+            )
+            if rules_match:
+                vibration_limit = float(rules_match.group(1))
+                logger.info(f"Límite de vibración extraído del PDF para {machine}: vibration <= {vibration_limit} mm/s")
+            else:
+                logger.warning(f"No se encontró el límite de vibración en el PDF de {machine}. Usando valor por defecto: {vibration_limit} mm/s")
+                warning_message = (
+                    f"Advertencia: No se encontró el límite de vibración en el PDF de {machine}. Usando valor por defecto: <= {vibration_limit} mm/s\n"
+                    f"Contenido del PDF:\n{compliance_text}\n"
+                    "Recomendación: Verifique que el PDF contenga la regla de vibración en el formato esperado."
+                )
+
+            compliance_report = []
+            non_compliant_count = 0
+            for log in machine_logs:
+                issue = None
+                if log["vibration"] > vibration_limit:
+                    issue = f"Vibración: {log['vibration']} mm/s excede el límite de {vibration_limit} mm/s"
+                    non_compliant_count += 1
+                
+                compliance_report.append({
+                    "id": log["id"],
+                    "date": log["date"],
+                    "machine": log["machine"],
+                    "production_line": log["production_line"],
+                    "material": log["material"],
+                    "metrics": {
+                        "uptime": log["uptime"],
+                        "defects": log["defects"],
+                        "vibration": log["vibration"],
+                        "temperature": log["temperature"],
+                        "throughput": log["throughput"],
+                        "inventory_level": log["inventory_level"]
+                    },
+                    "defect_type": log["defect_type"],
+                    "compliant": not issue,
+                    "issue": issue
+                })
+
+            results[machine] = {
+                "compliance_report": compliance_report,
+                "non_compliant_count": non_compliant_count,
+                "vibration_limit": vibration_limit,
+                "rules_found": bool(rules_match),
+                "warning_message": warning_message if not rules_match else None
+            }
+            total_records += len(compliance_report)
+
+        period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+        report = [
+            "Informe de Cumplimiento de Vibración para Todas las Máquinas",
+            "=========================================================",
+            f"Período: {period}",
+            f"Total de Máquinas Analizadas: {len(machines)}",
+            f"Total de Registros Analizados: {total_records}",
+            "",
+            "Detalles por Máquina",
+            "------------------"
+        ]
+
+        for machine, data in results.items():
+            if "error" in data:
+                report.append(
+                    f"Máquina: {machine}\n"
+                    f"  Error: {data['error']}\n"
+                    f"  Recomendación: {data['recommendation']}\n"
+                )
+                continue
+            
+            report.append(
+                f"Máquina: {machine}\n"
+                f"  Total de Registros: {len(data['compliance_report'])}\n"
+                f"  Límite Aplicado: Vibración <= {data['vibration_limit']} mm/s\n"
+            )
+            if not data["rules_found"]:
+                report.append(data["warning_message"] + "\n")
+            
+            report.append("  Detalles de Registros:\n")
+            for i, entry in enumerate(data["compliance_report"], 1):
+                status = "Conforme" if entry["compliant"] else "No Conforme"
+                issue_text = f"    - {entry['issue']}" if entry["issue"] else "    Ninguno"
+                report.append(
+                    f"    Registro {i}:\n"
+                    f"      ID: {entry['id']}\n"
+                    f"      Fecha: {entry['date']}\n"
+                    f"      Máquina: {entry['machine']}\n"
+                    f"      Línea de Producción: {entry['production_line']}\n"
+                    f"      Material: {entry['material']}\n"
+                    f"      Métricas:\n"
+                    f"        - Tiempo Activo: {entry['metrics']['uptime']}%\n"
+                    f"        - Defectos: {entry['metrics']['defects']}\n"
+                    f"        - Vibración: {entry['metrics']['vibration']} mm/s\n"
+                    f"        - Temperatura: {entry['metrics']['temperature']}°C\n"
+                    f"        - Rendimiento: {entry['metrics']['throughput']} unidades/h\n"
+                    f"        - Nivel de Inventario: {entry['metrics']['inventory_level']} unidades\n"
+                    f"      Tipo de Defecto: {entry['defect_type']}\n"
+                    f"      Estado: {status}\n"
+                    f"      Problema Detectado:\n{issue_text}\n"
+                )
+            
+            report.append(
+                f"  Resumen:\n"
+                f"    Registros No Conformes: {data['non_compliant_count']}\n"
+            )
+
+        report.extend([
+            "Instrucciones",
+            "------------",
+            f"Se verificaron {total_records} registros de producción de {len(machines)} máquinas para el período {period} contra los límites de vibración definidos en los manuales técnicos (PDF). "
+            f"Los registros listados como 'No Conforme' exceden los límites de vibración especificados para cada máquina. "
+            "Por favor, revise los registros no conformes detallados arriba para identificar las causas de las desviaciones y tomar acciones correctivas, como inspeccionar componentes mecánicos o programar mantenimiento."
+        ])
+        
+        return "\n".join(report)
+        
+    except Exception as e:
+        logger.error(f"No se pudo verificar el cumplimiento de vibración para las máquinas: {str(e)}")
+        return (
+            "Informe de Cumplimiento de Vibración para Todas las Máquinas\n"
+            "=========================================================\n"
+            f"Error: No se pudo verificar el cumplimiento de vibración para las máquinas.\n"
+            f"Detalles: {str(e)}\n"
+            "Recomendación: Contacte al equipo de soporte técnico para diagnosticar el problema."
+        )
 
 @mcp.tool()
-async def maintenance_recommendations(
-    ctx: Context, 
-    equipment: str,
+async def check_uptime_compliance(
+    ctx: Context,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None
 ) -> str:
-    time_filter = TimeFilter(
-        start_date=start_date,
-        end_date=end_date,
-        specific_date=specific_date
-    )
+    """
+    Verifica el cumplimiento del tiempo activo para todas las máquinas contra los límites definidos en los manuales técnicos (PDF).
+    """
     try:
-        time_filter.validate_dates()
-    except ValueError as e:
-        return str(e)
-    
-    params = {}
-    if time_filter.specific_date:
-        params["specific_date"] = time_filter.specific_date
-    else:
-        if time_filter.start_date:
-            params["start_date"] = time_filter.start_date
-        if time_filter.end_date:
-            params["end_date"] = time_filter.end_date
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{API_URL}/machines/{equipment}", params=params)
-        records = response.json()
-        
-        # Resto del código original SIN CAMBIOS
-        if not records:
-            return f"No hay datos suficientes para {equipment}"
-        
-        temps = [r["sensor_data"]["temperature"] for r in records]
-        pressures = [r["sensor_data"]["pressure"] for r in records]
-        vibes = [r["sensor_data"]["vibration"] for r in records]
-        rules = records[0]["contextual_info"]["compliance_rules"]
-        
-        recommendations = []
-        
-        temp_avg = statistics.mean(temps)
-        if temp_avg > rules["temperature_limit"] * 0.9:
-            recommendations.append(f"🔧 Limpieza de sistemas de refrigeración (límite: {rules['temperature_limit']}°C)")
-        
-        pressure_max = max(pressures)
-        if pressure_max > rules["pressure_limit"] * 0.85:
-            recommendations.append(f"🔧 Verificación de válvulas y sellos (límite: {rules['pressure_limit']} psi)")
-        
-        if statistics.mean(vibes) > 3.0:
-            recommendations.append("🔧 Balanceo de componentes rotativos")
-        
-        if not recommendations:
-            return f"""
-            ✅ {equipment} no requiere mantenimiento preventivo inmediato
-            - Temperatura actual: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
-            - Presión actual: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
-            - Notas operativas: {rules['process_notes']}
-            
-            💡 CONTEXTO PARA EL LLM: Equipo opera dentro de parámetros normales. 
-            Monitorear si valores se acercan a límites ({rules['temperature_limit']}°C/{rules['pressure_limit']} psi).
-            Considerar: {rules['process_notes']}
-            """
+        time_filter = TimeFilter(
+            start_date=start_date,
+            end_date=end_date,
+            specific_date=specific_date
+        )
+        try:
+            time_filter.validate_dates()
+        except ValueError as e:
+            return (
+                "Informe de Cumplimiento de Tiempo Activo para Todas las Máquinas\n"
+                "=============================================================\n"
+                f"Error: Error en parámetros de fecha: {str(e)}.\n"
+                "Recomendación: Use fechas en formato YYYY-MM-DD (por ejemplo, '2025-04-01')."
+            )
+
+        endpoint = f"{API_URL}/machines/"
+        params = {}
+        if time_filter.specific_date:
+            params["specific_date"] = time_filter.specific_date
         else:
-            return f"""
-            🛠️ Recomendaciones para {equipment}:
-            Basado en {len(records)} registros:
-            {chr(10).join(f'- {rec}' for rec in recommendations)}
+            if time_filter.start_date:
+                params["start_date"] = time_filter.start_date
+            if time_filter.end_date:
+                params["end_date"] = time_filter.end_date
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(endpoint, params=params)
+                logs = response.json()
+                if not logs:
+                    return (
+                        "Informe de Cumplimiento de Tiempo Activo para Todas las Máquinas\n"
+                        "=============================================================\n"
+                        f"Período: {time_filter.specific_date or f'{time_filter.start_date} a {time_filter.end_date}'}\n"
+                        "Resultado: No se encontraron registros.\n"
+                        "Recomendación: Verifique si las máquinas estuvieron operativas durante el período especificado."
+                    )
+            except httpx.RequestError as e:
+                logger.error(f"Error en la solicitud API: {str(e)}")
+                return (
+                    "Informe de Cumplimiento de Tiempo Activo para Todas las Máquinas\n"
+                    "=============================================================\n"
+                    f"Error: No se pudieron recuperar datos de la API.\n"
+                    f"Detalles: {str(e)}\n"
+                    "Recomendación: Verifique la conexión con la API o contacte al equipo de soporte técnico."
+                )
+
+        machines = sorted(set(log["machine"] for log in logs))
+        if not machines:
+            return (
+                "Informe de Cumplimiento de Tiempo Activo para Todas las Máquinas\n"
+                "=============================================================\n"
+                "Error: No se encontraron máquinas en los registros.\n"
+                "Recomendación: Asegúrese de que los datos de producción estén registrados."
+            )
+
+        results = {}
+        pdf_cache = {}
+        total_records = 0
+
+        for machine in machines:
+            machine_logs = [log for log in logs if log["machine"] == machine]
+            if not machine_logs:
+                continue
+
+            if machine not in pdf_cache:
+                pdf_result = await read_pdf(ctx, machine=machine)
+                if "Error:" in pdf_result:
+                    results[machine] = {
+                        "error": pdf_result.split("Error: ")[1].split("\n")[0],
+                        "recommendation": "Cargue el manual técnico de la máquina como PDF en el sistema."
+                    }
+                    continue
+                pdf_cache[machine] = pdf_result.split("Contenido Extraído\n-----------------\n")[1].split("\n\nRecomendaciones\n--------------")[0]
+
+            compliance_text = pdf_cache[machine]
             
-            **Límites Operativos:**
-            - Temperatura: {temps[0]}°C (Límite: {rules['temperature_limit']}°C)
-            - Presión: {pressures[0]} psi (Límite: {rules['pressure_limit']} psi)
-            - Vibración: {vibes[0]} mm/s
-            - Notas: {rules['process_notes']}
+            uptime_min = 90.0
+            rules_match = re.search(
+                r"uptime\s*[>≥=]+\s*(\d+\.?\d*)\s*%",
+                compliance_text,
+                re.IGNORECASE
+            )
+            if rules_match:
+                uptime_min = float(rules_match.group(1))
+                logger.info(f"Límite de tiempo activo extraído del PDF para {machine}: uptime >= {uptime_min}%")
+            else:
+                logger.warning(f"No se encontró el límite de tiempo activo en el PDF de {machine}. Usando valor por defecto: {uptime_min}%")
+                warning_message = (
+                    f"Advertencia: No se encontró el límite de tiempo activo en el PDF de {machine}. Usando valor por defecto: >= {uptime_min}%\n"
+                    f"Contenido del PDF:\n{compliance_text}\n"
+                    "Recomendación: Verifique que el PDF contenga la regla de tiempo activo en el formato esperado."
+                )
+
+            compliance_report = []
+            non_compliant_count = 0
+            for log in machine_logs:
+                issue = None
+                if log["uptime"] < uptime_min:
+                    issue = f"Tiempo Activo: {log['uptime']}% está por debajo del mínimo de {uptime_min}%"
+                    non_compliant_count += 1
+                
+                compliance_report.append({
+                    "id": log["id"],
+                    "date": log["date"],
+                    "machine": log["machine"],
+                    "production_line": log["production_line"],
+                    "material": log["material"],
+                    "metrics": {
+                        "uptime": log["uptime"],
+                        "defects": log["defects"],
+                        "vibration": log["vibration"],
+                        "temperature": log["temperature"],
+                        "throughput": log["throughput"],
+                        "inventory_level": log["inventory_level"]
+                    },
+                    "defect_type": log["defect_type"],
+                    "compliant": not issue,
+                    "issue": issue
+                })
+
+            results[machine] = {
+                "compliance_report": compliance_report,
+                "non_compliant_count": non_compliant_count,
+                "uptime_min": uptime_min,
+                "rules_found": bool(rules_match),
+                "warning_message": warning_message if not rules_match else None
+            }
+            total_records += len(compliance_report)
+
+        period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+        report = [
+            "Informe de Cumplimiento de Tiempo Activo para Todas las Máquinas",
+            "=============================================================",
+            f"Período: {period}",
+            f"Total de Máquinas Analizadas: {len(machines)}",
+            f"Total de Registros Analizados: {total_records}",
+            "",
+            "Detalles por Máquina",
+            "------------------"
+        ]
+
+        for machine, data in results.items():
+            if "error" in data:
+                report.append(
+                    f"Máquina: {machine}\n"
+                    f"  Error: {data['error']}\n"
+                    f"  Recomendación: {data['recommendation']}\n"
+                )
+                continue
             
-            💡 CONTEXTO PARA EL LLM: Priorizar recomendaciones cerca de límites. 
-            Considerar impacto en producción y notas operativas.
-            """
+            report.append(
+                f"Máquina: {machine}\n"
+                f"  Total de Registros: {len(data['compliance_report'])}\n"
+                f"  Límite Aplicado: Tiempo Activo >= {data['uptime_min']}%\n"
+            )
+            if not data["rules_found"]:
+                report.append(data["warning_message"] + "\n")
+            
+            report.append("  Detalles de Registros:\n")
+            for i, entry in enumerate(data["compliance_report"], 1):
+                status = "Conforme" if entry["compliant"] else "No Conforme"
+                issue_text = f"    - {entry['issue']}" if entry["issue"] else "    Ninguno"
+                report.append(
+                    f"    Registro {i}:\n"
+                    f"      ID: {entry['id']}\n"
+                    f"      Fecha: {entry['date']}\n"
+                    f"      Máquina: {entry['machine']}\n"
+                    f"      Línea de Producción: {entry['production_line']}\n"
+                    f"      Material: {entry['material']}\n"
+                    f"      Métricas:\n"
+                    f"        - Tiempo Activo: {entry['metrics']['uptime']}%\n"
+                    f"        - Defectos: {entry['metrics']['defects']}\n"
+                    f"        - Vibración: {entry['metrics']['vibration']} mm/s\n"
+                    f"        - Temperatura: {entry['metrics']['temperature']}°C\n"
+                    f"        - Rendimiento: {entry['metrics']['throughput']} unidades/h\n"
+                    f"        - Nivel de Inventario: {entry['metrics']['inventory_level']} unidades\n"
+                    f"      Tipo de Defecto: {entry['defect_type']}\n"
+                    f"      Estado: {status}\n"
+                    f"      Problema Detectado:\n{issue_text}\n"
+                )
+            
+            report.append(
+                f"  Resumen:\n"
+                f"    Registros No Conformes: {data['non_compliant_count']}\n"
+            )
+
+        report.extend([
+            "Instrucciones",
+            "------------",
+            f"Se verificaron {total_records} registros de producción de {len(machines)} máquinas para el período {period} contra los límites de tiempo activo definidos en los manuales técnicos (PDF). "
+            f"Los registros listados como 'No Conforme' están por debajo de los límites de tiempo activo especificados para cada máquina. "
+            "Por favor, revise los registros no conformes detallados arriba para identificar las causas de las desviaciones y tomar acciones correctivas, como investigar paradas no planificadas o optimizar el mantenimiento preventivo."
+        ])
+        
+        return "\n".join(report)
+        
+    except Exception as e:
+        logger.error(f"No se pudo verificar el cumplimiento de tiempo activo para las máquinas: {str(e)}")
+        return (
+            "Informe de Cumplimiento de Tiempo Activo para Todas las Máquinas\n"
+            "=============================================================\n"
+            f"Error: No se pudo verificar el cumplimiento de tiempo activo para las máquinas.\n"
+            f"Detalles: {str(e)}\n"
+            "Recomendación: Contacte al equipo de soporte técnico para diagnosticar el problema."
+        )
+
+@mcp.tool()
+async def check_defects_compliance(
+    ctx: Context,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_date: Optional[str] = None
+) -> str:
+    """
+    Verifica el cumplimiento de defectos para todas las máquinas contra los límites definidos en los manuales técnicos (PDF).
+    """
+    try:
+        time_filter = TimeFilter(
+            start_date=start_date,
+            end_date=end_date,
+            specific_date=specific_date
+        )
+        try:
+            time_filter.validate_dates()
+        except ValueError as e:
+            return (
+                "Informe de Cumplimiento de Defectos para Todas las Máquinas\n"
+                "========================================================\n"
+                f"Error: Error en parámetros de fecha: {str(e)}.\n"
+                "Recomendación: Use fechas en formato YYYY-MM-DD (por ejemplo, '2025-04-01')."
+            )
+
+        endpoint = f"{API_URL}/machines/"
+        params = {}
+        if time_filter.specific_date:
+            params["specific_date"] = time_filter.specific_date
+        else:
+            if time_filter.start_date:
+                params["start_date"] = time_filter.start_date
+            if time_filter.end_date:
+                params["end_date"] = time_filter.end_date
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(endpoint, params=params)
+                logs = response.json()
+                if not logs:
+                    return (
+                        "Informe de Cumplimiento de Defectos para Todas las Máquinas\n"
+                        "========================================================\n"
+                        f"Período: {time_filter.specific_date or f'{time_filter.start_date} a {time_filter.end_date}'}\n"
+                        "Resultado: No se encontraron registros.\n"
+                        "Recomendación: Verifique si las máquinas estuvieron operativas durante el período especificado."
+                    )
+            except httpx.RequestError as e:
+                logger.error(f"Error en la solicitud API: {str(e)}")
+                return (
+                    "Informe de Cumplimiento de Defectos para Todas las Máquinas\n"
+                    "========================================================\n"
+                    f"Error: No se pudieron recuperar datos de la API.\n"
+                    f"Detalles: {str(e)}\n"
+                    "Recomendación: Verifique la conexión con la API o contacte al equipo de soporte técnico."
+                )
+
+        machines = sorted(set(log["machine"] for log in logs))
+        if not machines:
+            return (
+                "Informe de Cumplimiento de Defectos para Todas las Máquinas\n"
+                "========================================================\n"
+                "Error: No se encontraron máquinas en los registros.\n"
+                "Recomendación: Asegúrese de que los datos de producción estén registrados."
+            )
+
+        results = {}
+        pdf_cache = {}
+        total_records = 0
+
+        for machine in machines:
+            machine_logs = [log for log in logs if log["machine"] == machine]
+            if not machine_logs:
+                continue
+
+            if machine not in pdf_cache:
+                pdf_result = await read_pdf(ctx, machine=machine)
+                if "Error:" in pdf_result:
+                    results[machine] = {
+                        "error": pdf_result.split("Error: ")[1].split("\n")[0],
+                        "recommendation": "Cargue el manual técnico de la máquina como PDF en el sistema."
+                    }
+                    continue
+                pdf_cache[machine] = pdf_result.split("Contenido Extraído\n-----------------\n")[1].split("\n\nRecomendaciones\n--------------")[0]
+
+            compliance_text = pdf_cache[machine]
+            
+            defects_limit = 2
+            rules_match = re.search(
+                r"defects\s*[<≤=]+\s*(\d+)",
+                compliance_text,
+                re.IGNORECASE
+            )
+            if rules_match:
+                defects_limit = int(rules_match.group(1))
+                logger.info(f"Límite de defectos extraído del PDF para {machine}: defects <= {defects_limit}")
+            else:
+                logger.warning(f"No se encontró el límite de defectos en el PDF de {machine}. Usando valor por defecto: {defects_limit}")
+                warning_message = (
+                    f"Advertencia: No se encontró el límite de defectos en el PDF de {machine}. Usando valor por defecto: <= {defects_limit}\n"
+                    f"Contenido del PDF:\n{compliance_text}\n"
+                    "Recomendación: Verifique que el PDF contenga la regla de defectos en el formato esperado."
+                )
+
+            compliance_report = []
+            non_compliant_count = 0
+            for log in machine_logs:
+                issue = None
+                if log["defects"] > defects_limit:
+                    issue = f"Defectos: {log['defects']} excede el límite de {defects_limit}"
+                    non_compliant_count += 1
+                
+                compliance_report.append({
+                    "id": log["id"],
+                    "date": log["date"],
+                    "machine": log["machine"],
+                    "production_line": log["production_line"],
+                    "material": log["material"],
+                    "metrics": {
+                        "uptime": log["uptime"],
+                        "defects": log["defects"],
+                        "vibration": log["vibration"],
+                        "temperature": log["temperature"],
+                        "throughput": log["throughput"],
+                        "inventory_level": log["inventory_level"]
+                    },
+                    "defect_type": log["defect_type"],
+                    "compliant": not issue,
+                    "issue": issue
+                })
+
+            results[machine] = {
+                "compliance_report": compliance_report,
+                "non_compliant_count": non_compliant_count,
+                "defects_limit": defects_limit,
+                "rules_found": bool(rules_match),
+                "warning_message": warning_message if not rules_match else None
+            }
+            total_records += len(compliance_report)
+
+        period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+        report = [
+            "Informe de Cumplimiento de Defectos para Todas las Máquinas",
+            "=========================================================",
+            f"Período: {period}",
+            f"Total de Máquinas Analizadas: {len(machines)}",
+            f"Total de Registros Analizados: {total_records}",
+            "",
+            "Detalles por Máquina",
+            "------------------"
+        ]
+
+        for machine, data in results.items():
+            if "error" in data:
+                report.append(
+                    f"Máquina: {machine}\n"
+                    f"  Error: {data['error']}\n"
+                    f"  Recomendación: {data['recommendation']}\n"
+                )
+                continue
+            
+            report.append(
+                f"Máquina: {machine}\n"
+                f"  Total de Registros: {len(data['compliance_report'])}\n"
+                f"  Límite Aplicado: Defectos <= {data['defects_limit']}\n"
+            )
+            if not data["rules_found"]:
+                report.append(data["warning_message"] + "\n")
+            
+            report.append("  Detalles de Registros:\n")
+            for i, entry in enumerate(data["compliance_report"], 1):
+                status = "Conforme" if entry["compliant"] else "No Conforme"
+                issue_text = f"    - {entry['issue']}" if entry["issue"] else "    Ninguno"
+                report.append(
+                    f"    Registro {i}:\n"
+                    f"      ID: {entry['id']}\n"
+                    f"      Fecha: {entry['date']}\n"
+                    f"      Máquina: {entry['machine']}\n"
+                    f"      Línea de Producción: {entry['production_line']}\n"
+                    f"      Material: {entry['material']}\n"
+                    f"      Métricas:\n"
+                    f"        - Tiempo Activo: {entry['metrics']['uptime']}%\n"
+                    f"        - Defectos: {entry['metrics']['defects']}\n"
+                    f"        - Vibración: {entry['metrics']['vibration']} mm/s\n"
+                    f"        - Temperatura: {entry['metrics']['temperature']}°C\n"
+                    f"        - Rendimiento: {entry['metrics']['throughput']} unidades/h\n"
+                    f"        - Nivel de Inventario: {entry['metrics']['inventory_level']} unidades\n"
+                    f"      Tipo de Defecto: {entry['defect_type']}\n"
+                    f"      Estado: {status}\n"
+                    f"      Problema Detectado:\n{issue_text}\n"
+                )
+            
+            report.append(
+                f"  Resumen:\n"
+                f"    Registros No Conformes: {data['non_compliant_count']}\n"
+            )
+
+        report.extend([
+            "Instrucciones",
+            "------------",
+            f"Se verificaron {total_records} registros de producción de {len(machines)} máquinas para el período {period} contra los límites de defectos definidos en los manuales técnicos (PDF). "
+            f"Los registros listados como 'No Conforme' exceden los límites de defectos especificados para cada máquina. "
+            "Por favor, revise los registros no conformes detallados arriba para identificar las causas de las desviaciones y tomar acciones correctivas, como analizar el proceso de producción o implementar controles de calidad adicionales."
+        ])
+        
+        return "\n".join(report)
+        
+    except Exception as e:
+        logger.error(f"No se pudo verificar el cumplimiento de defectos para las máquinas: {str(e)}")
+        return (
+            "Informe de Cumplimiento de Defectos para Todas las Máquinas\n"
+            "========================================================\n"
+            f"Error: No se pudo verificar el cumplimiento de defectos para las máquinas.\n"
+            f"Detalles: {str(e)}\n"
+            "Recomendación: Contacte al equipo de soporte técnico para diagnosticar el problema."
+        )
 
 if __name__ == "__main__":
     mcp.run()
