@@ -11,7 +11,7 @@ COPY . /app
 
 # Instala las dependencias de MCP (ajusta según tu requirements.txt si lo tienes)
 RUN pip install "mcp[cli]"
-RUN pip install httpx torch==2.0.1 transformers==4.41.2 sentence-transformers==2.7.0
+RUN pip install httpx torch==2.0.1 transformers==4.41.2 huggingface_hub[hf_xet] sentence-transformers==2.7.0
 
 # Expone el puerto (opcional, solo para documentación)
 EXPOSE 8000

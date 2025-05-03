@@ -61,12 +61,12 @@ def init_db():
             ("2025-04-10", "ModelA", "Line1", "Steel", 87.0, 3, 0.8, 73.0, "surface_crack", 100.0, 500),
             ("2025-04-11", "ModelA", "Line2", "Aluminum", 95.0, 0, 0.5, 80.0, "none", 110.0, 400),
             ("2025-04-12", "ModelB", "Line3", "Copper", 90.0, 1, 0.9, 73.0, "surface_scratch", 105.0, 600),
-            ("2025-04-13", "ModelB", "Line1", "Plastic", 92.0, 2, 0.7, 78.0, "surface_dent", 108.0, 450),
-            ("2025-04-14", "ModelC", "Line2", "Steel", 88.0, 4, 1.2, 80.0, "surface_crack", 95.0, 550),
-            ("2025-04-15", "ModelC", "Line3", "Aluminum", 97.0, 0, 0.4, 73.0, "none", 115.0, 380),
-            ("2025-04-16", "ModelA", "Line1", "Copper", 85.0, 2, 1.0, 72.0, "surface_scratch", 98.0, 520),
-            ("2025-04-17", "ModelB", "Line2", "Plastic", 93.0, 1, 0.6, 76.0, "surface_dent", 112.0, 470),
-            ("2025-04-18", "ModelC", "Line3", "Steel", 89.0, 3, 0.9, 72.0, "surface_crack", 102.0, 510)
+            ("2025-04-13", "ModelB", "Line1", "Plastic", 95.0, 0, 0.5, 78.0, "surface_dent", 108.0, 450),
+            ("2025-04-14", "ModelC", "Line2", "Steel", 88.0, 4, 0.2, 80.0, "surface_crack", 95.0, 550),
+            ("2025-04-15", "ModelC", "Line3", "Aluminum", 97.0, 0, 0.9, 73.0, "none", 115.0, 380),
+            ("2025-04-16", "ModelA", "Line1", "Copper", 85.0, 1, 0.2, 72.0, "surface_scratch", 98.0, 520),
+            ("2025-04-17", "ModelB", "Line2", "Plastic", 91.0, 2, 0.4, 76.0, "surface_dent", 112.0, 470),
+            ("2025-04-18", "ModelC", "Line3", "Steel", 89.0, 1, 0.6, 72.0, "surface_crack", 102.0, 510)
         ]
         
         cursor.executemany("""
