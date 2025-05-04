@@ -1,7 +1,7 @@
 import httpx
 from mcp.server.fastmcp import FastMCP, Context
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 import logging
 from pydantic import BaseModel
 import re
@@ -160,10 +160,12 @@ async def check_temperature_compliance(
     ctx: Context,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
+    specific_date: Optional[str] = None,
+    machines: Optional[List[str]] = None,
+    production_lines: Optional[List[str]] = None
 ) -> str:
     """
-    Verifica el cumplimiento de temperatura para todas las máquinas contra límites en PDFs.
+    Verifica el cumplimiento de temperatura para las máquinas especificadas contra límites en PDFs.
     Informe optimizado para Llama 3.1 en OpenWebUI.
     """
     try:
@@ -188,22 +190,48 @@ async def check_temperature_compliance(
             response = await client.get(endpoint, params=params)
             response.raise_for_status()
             logs = response.json()
-            if not logs:
+
+            # Aplicar filtros de máquinas y líneas de producción
+            filtered_logs = logs
+            if machines:
+                machines_set = set(m.lower() for m in machines)
+                filtered_logs = [log for log in filtered_logs if log["machine"].lower() in machines_set]
+            if production_lines:
+                lines_set = set(l.lower() for l in production_lines)
+                filtered_logs = [log for log in filtered_logs if log["production_line"].lower() in lines_set]
+
+            if not filtered_logs:
                 period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+                filter_info = []
+                if machines:
+                    filter_info.append(f"Máquinas: {', '.join(machines)}")
+                if production_lines:
+                    filter_info.append(f"Líneas: {', '.join(production_lines)}")
+                filter_text = "\n".join(filter_info) or "Ninguno"
                 return (
                     "Informe de Cumplimiento de Temperatura\n"
                     "=====================================\n"
                     f"Período: {period}\n"
+                    f"Filtros Aplicados:\n{filter_text}\n"
                     "Estado: Sin datos\n"
-                    "Mensaje: No se encontraron registros.\n"
-                    "Recomendación: Verifique si las máquinas estuvieron operativas."
+                    "Mensaje: No se encontraron registros con los filtros especificados.\n"
+                    "Recomendación: Verifique los nombres de máquinas o líneas de producción."
                 )
 
-        machines = sorted(set(log["machine"] for log in logs))
-        if not machines:
+        machines_set = sorted(set(log["machine"] for log in filtered_logs))
+        if not machines_set:
+            period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+            filter_info = []
+            if machines:
+                filter_info.append(f"Máquinas: {', '.join(machines)}")
+            if production_lines:
+                filter_info.append(f"Líneas: {', '.join(production_lines)}")
+            filter_text = "\n".join(filter_info) or "Ninguno"
             return (
                 "Informe de Cumplimiento de Temperatura\n"
                 "=====================================\n"
+                f"Período: {period}\n"
+                f"Filtros Aplicados:\n{filter_text}\n"
                 "Estado: Error\n"
                 "Mensaje: No se encontraron máquinas en los registros.\n"
                 "Recomendación: Asegure que los datos de producción estén registrados."
@@ -213,8 +241,8 @@ async def check_temperature_compliance(
         pdf_cache = {}
         total_records = 0
 
-        for machine in machines:
-            machine_logs = [log for log in logs if log["machine"] == machine]
+        for machine in machines_set:
+            machine_logs = [log for log in filtered_logs if log["machine"] == machine]
             if not machine_logs:
                 continue
 
@@ -283,11 +311,18 @@ async def check_temperature_compliance(
             total_records += len(compliance_report)
 
         period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+        filter_info = []
+        if machines:
+            filter_info.append(f"Máquinas Filtradas: {', '.join(machines)}")
+        if production_lines:
+            filter_info.append(f"Líneas Filtradas: {', '.join(production_lines)}")
+        filter_text = "\n".join(filter_info) or "Ninguno"
         report = [
             "Informe de Cumplimiento de Temperatura",
             "=====================================",
             f"Período: {period}",
-            f"Máquinas Analizadas: {len(machines)}",
+            f"Filtros Aplicados:\n{filter_text}",
+            f"Máquinas Analizadas: {len(machines_set)}",
             f"Registros Analizados: {total_records}",
             "",
             "Detalles por Máquina",
@@ -342,7 +377,7 @@ async def check_temperature_compliance(
         report.extend([
             "Instrucciones",
             "-------------",
-            f"Se verificaron {total_records} registros de {len(machines)} máquinas en {period} contra límites de temperatura en PDFs. "
+            f"Se verificaron {total_records} registros de {len(machines_set)} máquinas en {period} contra límites de temperatura en PDFs. "
             "Los registros 'No Conforme' exceden los límites. Revise los detalles para tomar acciones correctivas."
         ])
         
@@ -364,10 +399,12 @@ async def check_vibration_compliance(
     ctx: Context,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
+    specific_date: Optional[str] = None,
+    machines: Optional[List[str]] = None,
+    production_lines: Optional[List[str]] = None
 ) -> str:
     """
-    Verifica el cumplimiento de vibración para todas las máquinas contra límites en PDFs.
+    Verifica el cumplimiento de vibración para las máquinas especificadas contra límites en PDFs.
     Informe optimizado para Llama 3.1 en OpenWebUI.
     """
     try:
@@ -392,22 +429,48 @@ async def check_vibration_compliance(
             response = await client.get(endpoint, params=params)
             response.raise_for_status()
             logs = response.json()
-            if not logs:
+
+            # Aplicar filtros de máquinas y líneas de producción
+            filtered_logs = logs
+            if machines:
+                machines_set = set(m.lower() for m in machines)
+                filtered_logs = [log for log in filtered_logs if log["machine"].lower() in machines_set]
+            if production_lines:
+                lines_set = set(l.lower() for l in production_lines)
+                filtered_logs = [log for log in filtered_logs if log["production_line"].lower() in lines_set]
+
+            if not filtered_logs:
                 period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+                filter_info = []
+                if machines:
+                    filter_info.append(f"Máquinas: {', '.join(machines)}")
+                if production_lines:
+                    filter_info.append(f"Líneas: {', '.join(production_lines)}")
+                filter_text = "\n".join(filter_info) or "Ninguno"
                 return (
                     "Informe de Cumplimiento de Vibración\n"
                     "===================================\n"
                     f"Período: {period}\n"
+                    f"Filtros Aplicados:\n{filter_text}\n"
                     "Estado: Sin datos\n"
-                    "Mensaje: No se encontraron registros.\n"
-                    "Recomendación: Verifique si las máquinas estuvieron operativas."
+                    "Mensaje: No se encontraron registros con los filtros especificados.\n"
+                    "Recomendación: Verifique los nombres de máquinas o líneas de producción."
                 )
 
-        machines = sorted(set(log["machine"] for log in logs))
-        if not machines:
+        machines_set = sorted(set(log["machine"] for log in filtered_logs))
+        if not machines_set:
+            period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+            filter_info = []
+            if machines:
+                filter_info.append(f"Máquinas: {', '.join(machines)}")
+            if production_lines:
+                filter_info.append(f"Líneas: {', '.join(production_lines)}")
+            filter_text = "\n".join(filter_info) or "Ninguno"
             return (
                 "Informe de Cumplimiento de Vibración\n"
                 "===================================\n"
+                f"Período: {period}\n"
+                f"Filtros Aplicados:\n{filter_text}\n"
                 "Estado: Error\n"
                 "Mensaje: No se encontraron máquinas en los registros.\n"
                 "Recomendación: Asegure que los datos de producción estén registrados."
@@ -417,8 +480,8 @@ async def check_vibration_compliance(
         pdf_cache = {}
         total_records = 0
 
-        for machine in machines:
-            machine_logs = [log for log in logs if log["machine"] == machine]
+        for machine in machines_set:
+            machine_logs = [log for log in filtered_logs if log["machine"] == machine]
             if not machine_logs:
                 continue
 
@@ -487,11 +550,18 @@ async def check_vibration_compliance(
             total_records += len(compliance_report)
 
         period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+        filter_info = []
+        if machines:
+            filter_info.append(f"Máquinas Filtradas: {', '.join(machines)}")
+        if production_lines:
+            filter_info.append(f"Líneas Filtradas: {', '.join(production_lines)}")
+        filter_text = "\n".join(filter_info) or "Ninguno"
         report = [
             "Informe de Cumplimiento de Vibración",
             "===================================",
             f"Período: {period}",
-            f"Máquinas Analizadas: {len(machines)}",
+            f"Filtros Aplicados:\n{filter_text}",
+            f"Máquinas Analizadas: {len(machines_set)}",
             f"Registros Analizados: {total_records}",
             "",
             "Detalles por Máquina",
@@ -546,7 +616,7 @@ async def check_vibration_compliance(
         report.extend([
             "Instrucciones",
             "-------------",
-            f"Se verificaron {total_records} registros de {len(machines)} máquinas en {period} contra límites de vibración en PDFs. "
+            f"Se verificaron {total_records} registros de {len(machines_set)} máquinas en {period} contra límites de vibración en PDFs. "
             "Los registros 'No Conforme' exceden los límites. Revise los detalles para tomar acciones correctivas."
         ])
         
@@ -568,10 +638,12 @@ async def check_uptime_compliance(
     ctx: Context,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
+    specific_date: Optional[str] = None,
+    machines: Optional[List[str]] = None,
+    production_lines: Optional[List[str]] = None
 ) -> str:
     """
-    Verifica el cumplimiento de tiempo activo para todas las máquinas contra límites en PDFs.
+    Verifica el cumplimiento de tiempo activo para las máquinas especificadas contra límites en PDFs.
     Informe optimizado para Llama 3.1 en OpenWebUI.
     """
     try:
@@ -596,22 +668,48 @@ async def check_uptime_compliance(
             response = await client.get(endpoint, params=params)
             response.raise_for_status()
             logs = response.json()
-            if not logs:
+
+            # Aplicar filtros de máquinas y líneas de producción
+            filtered_logs = logs
+            if machines:
+                machines_set = set(m.lower() for m in machines)
+                filtered_logs = [log for log in filtered_logs if log["machine"].lower() in machines_set]
+            if production_lines:
+                lines_set = set(l.lower() for l in production_lines)
+                filtered_logs = [log for log in filtered_logs if log["production_line"].lower() in lines_set]
+
+            if not filtered_logs:
                 period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+                filter_info = []
+                if machines:
+                    filter_info.append(f"Máquinas: {', '.join(machines)}")
+                if production_lines:
+                    filter_info.append(f"Líneas: {', '.join(production_lines)}")
+                filter_text = "\n".join(filter_info) or "Ninguno"
                 return (
                     "Informe de Cumplimiento de Uptime\n"
                     "================================\n"
                     f"Período: {period}\n"
+                    f"Filtros Aplicados:\n{filter_text}\n"
                     "Estado: Sin datos\n"
-                    "Mensaje: No se encontraron registros.\n"
-                    "Recomendación: Verifique si las máquinas estuvieron operativas."
+                    "Mensaje: No se encontraron registros con los filtros especificados.\n"
+                    "Recomendación: Verifique los nombres de máquinas o líneas de producción."
                 )
 
-        machines = sorted(set(log["machine"] for log in logs))
-        if not machines:
+        machines_set = sorted(set(log["machine"] for log in filtered_logs))
+        if not machines_set:
+            period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+            filter_info = []
+            if machines:
+                filter_info.append(f"Máquinas: {', '.join(machines)}")
+            if production_lines:
+                filter_info.append(f"Líneas: {', '.join(production_lines)}")
+            filter_text = "\n".join(filter_info) or "Ninguno"
             return (
                 "Informe de Cumplimiento de Uptime\n"
                 "================================\n"
+                f"Período: {period}\n"
+                f"Filtros Aplicados:\n{filter_text}\n"
                 "Estado: Error\n"
                 "Mensaje: No se encontraron máquinas en los registros.\n"
                 "Recomendación: Asegure que los datos de producción estén registrados."
@@ -621,8 +719,8 @@ async def check_uptime_compliance(
         pdf_cache = {}
         total_records = 0
 
-        for machine in machines:
-            machine_logs = [log for log in logs if log["machine"] == machine]
+        for machine in machines_set:
+            machine_logs = [log for log in filtered_logs if log["machine"] == machine]
             if not machine_logs:
                 continue
 
@@ -691,11 +789,18 @@ async def check_uptime_compliance(
             total_records += len(compliance_report)
 
         period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+        filter_info = []
+        if machines:
+            filter_info.append(f"Máquinas Filtradas: {', '.join(machines)}")
+        if production_lines:
+            filter_info.append(f"Líneas Filtradas: {', '.join(production_lines)}")
+        filter_text = "\n".join(filter_info) or "Ninguno"
         report = [
             "Informe de Cumplimiento de Uptime",
             "================================",
             f"Período: {period}",
-            f"Máquinas Analizadas: {len(machines)}",
+            f"Filtros Aplicados:\n{filter_text}",
+            f"Máquinas Analizadas: {len(machines_set)}",
             f"Registros Analizados: {total_records}",
             "",
             "Detalles por Máquina",
@@ -750,7 +855,7 @@ async def check_uptime_compliance(
         report.extend([
             "Instrucciones",
             "-------------",
-            f"Se verificaron {total_records} registros de {len(machines)} máquinas en {period} contra límites de uptime en PDFs. "
+            f"Se verificaron {total_records} registros de {len(machines_set)} máquinas en {period} contra límites de uptime en PDFs. "
             "Los registros 'No Conforme' están por debajo del límite. Revise los detalles para tomar acciones correctivas."
         ])
         
@@ -772,10 +877,12 @@ async def check_defects_compliance(
     ctx: Context,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
+    specific_date: Optional[str] = None,
+    machines: Optional[List[str]] = None,
+    production_lines: Optional[List[str]] = None
 ) -> str:
     """
-    Verifica el cumplimiento de defectos para todas las máquinas contra límites en PDFs.
+    Verifica el cumplimiento de defectos para las máquinas especificadas contra límites en PDFs.
     Informe optimizado para Llama 3.1 en OpenWebUI.
     """
     try:
@@ -800,22 +907,48 @@ async def check_defects_compliance(
             response = await client.get(endpoint, params=params)
             response.raise_for_status()
             logs = response.json()
-            if not logs:
+
+            # Aplicar filtros de máquinas y líneas de producción
+            filtered_logs = logs
+            if machines:
+                machines_set = set(m.lower() for m in machines)
+                filtered_logs = [log for log in filtered_logs if log["machine"].lower() in machines_set]
+            if production_lines:
+                lines_set = set(l.lower() for l in production_lines)
+                filtered_logs = [log for log in filtered_logs if log["production_line"].lower() in lines_set]
+
+            if not filtered_logs:
                 period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+                filter_info = []
+                if machines:
+                    filter_info.append(f"Máquinas: {', '.join(machines)}")
+                if production_lines:
+                    filter_info.append(f"Líneas: {', '.join(production_lines)}")
+                filter_text = "\n".join(filter_info) or "Ninguno"
                 return (
                     "Informe de Cumplimiento de Defectos\n"
                     "==================================\n"
                     f"Período: {period}\n"
+                    f"Filtros Aplicados:\n{filter_text}\n"
                     "Estado: Sin datos\n"
-                    "Mensaje: No se encontraron registros.\n"
-                    "Recomendación: Verifique si las máquinas estuvieron operativas."
+                    "Mensaje: No se encontraron registros con los filtros especificados.\n"
+                    "Recomendación: Verifique los nombres de máquinas o líneas de producción."
                 )
 
-        machines = sorted(set(log["machine"] for log in logs))
-        if not machines:
+        machines_set = sorted(set(log["machine"] for log in filtered_logs))
+        if not machines_set:
+            period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+            filter_info = []
+            if machines:
+                filter_info.append(f"Máquinas: {', '.join(machines)}")
+            if production_lines:
+                filter_info.append(f"Líneas: {', '.join(production_lines)}")
+            filter_text = "\n".join(filter_info) or "Ninguno"
             return (
                 "Informe de Cumplimiento de Defectos\n"
                 "==================================\n"
+                f"Período: {period}\n"
+                f"Filtros Aplicados:\n{filter_text}\n"
                 "Estado: Error\n"
                 "Mensaje: No se encontraron máquinas en los registros.\n"
                 "Recomendación: Asegure que los datos de producción estén registrados."
@@ -825,8 +958,8 @@ async def check_defects_compliance(
         pdf_cache = {}
         total_records = 0
 
-        for machine in machines:
-            machine_logs = [log for log in logs if log["machine"] == machine]
+        for machine in machines_set:
+            machine_logs = [log for log in filtered_logs if log["machine"] == machine]
             if not machine_logs:
                 continue
 
@@ -895,11 +1028,18 @@ async def check_defects_compliance(
             total_records += len(compliance_report)
 
         period = time_filter.specific_date or f"{time_filter.start_date} a {time_filter.end_date}"
+        filter_info = []
+        if machines:
+            filter_info.append(f"Máquinas Filtradas: {', '.join(machines)}")
+        if production_lines:
+            filter_info.append(f"Líneas Filtradas: {', '.join(production_lines)}")
+        filter_text = "\n".join(filter_info) or "Ninguno"
         report = [
             "Informe de Cumplimiento de Defectos",
             "==================================",
             f"Período: {period}",
-            f"Máquinas Analizadas: {len(machines)}",
+            f"Filtros Aplicados:\n{filter_text}",
+            f"Máquinas Analizadas: {len(machines_set)}",
             f"Registros Analizados: {total_records}",
             "",
             "Detalles por Máquina",
@@ -954,7 +1094,7 @@ async def check_defects_compliance(
         report.extend([
             "Instrucciones",
             "-------------",
-            f"Se verificaron {total_records} registros de {len(machines)} máquinas en {period} contra límites de defectos en PDFs. "
+            f"Se verificaron {total_records} registros de {len(machines_set)} máquinas en {period} contra límites de defectos en PDFs. "
             "Los registros 'No Conforme' exceden los límites. Revise los detalles para tomar acciones correctivas."
         ])
         
