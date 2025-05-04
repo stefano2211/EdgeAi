@@ -10,7 +10,7 @@ import torch
 import os
 
 # Inicializar FastMCP para OpenWebUI
-mcp = FastMCP("Industrial Analytics MCP")
+mcp = FastMCP("Analisis de Cumplimiento")
 
 # Configuración de URLs basada en docker-compose.yml
 API_URL = "http://api:5000"
