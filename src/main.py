@@ -175,7 +175,7 @@ async def check_temperature_compliance(
         time_filter.validate_dates()
 
         endpoint = f"{API_URL}/machines/"
-        params = {"offset": 0, "limit": 1000}  # Paginación para escalabilidad
+        params = {}
         if time_filter.specific_date:
             params["specific_date"] = time_filter.specific_date
         else:
@@ -379,7 +379,7 @@ async def check_vibration_compliance(
         time_filter.validate_dates()
 
         endpoint = f"{API_URL}/machines/"
-        params = {"offset": 0, "limit": 1000}
+        params = {}
         if time_filter.specific_date:
             params["specific_date"] = time_filter.specific_date
         else:
@@ -583,7 +583,7 @@ async def check_uptime_compliance(
         time_filter.validate_dates()
 
         endpoint = f"{API_URL}/machines/"
-        params = {"offset": 0, "limit": 1000}
+        params = {}
         if time_filter.specific_date:
             params["specific_date"] = time_filter.specific_date
         else:
@@ -787,7 +787,7 @@ async def check_defects_compliance(
         time_filter.validate_dates()
 
         endpoint = f"{API_URL}/machines/"
-        params = {"offset": 0, "limit": 1000}
+        params = {}
         if time_filter.specific_date:
             params["specific_date"] = time_filter.specific_date
         else:
