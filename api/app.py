@@ -9,17 +9,13 @@ import httpx
 
 app = FastAPI()
 
-class Event(BaseModel):
-    event_type: str  # Ejemplo: "machine_failure", "production_alert"
-    description: str
-    timestamp: datetime
-    equipment: str
 
 class MachineRecord(BaseModel):
     date: str  # Ejemplo: "2025-04-10"
     machine: str  # Ejemplo: "ModelA"
     production_line: str  # Ejemplo: "Line1"
     material: str  # Ejemplo: "Steel"
+    batch_id: str  # Ejemplo: "BATCH101"
     uptime: float  # Ejemplo: 95.0
     defects: int  # Ejemplo: 2
     vibration: float  # Ejemplo: 0.5
@@ -30,10 +26,12 @@ class MachineRecord(BaseModel):
 
 # Inicialización de la base de datos con registros fijos
 def init_db():
-    conn = sqlite3.connect("database.db")
+    
+    db_path = "/app/database.db"
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    # Crear tabla machines
+    # Crear tabla machines con batch_id
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS machines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,6 +39,7 @@ def init_db():
             machine TEXT NOT NULL,
             production_line TEXT NOT NULL,
             material TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
             uptime REAL NOT NULL,
             defects INTEGER NOT NULL,
             vibration REAL NOT NULL,
@@ -55,28 +54,34 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM machines")
     count = cursor.fetchone()[0]
     
-    # Insertar 9 registros fijos si la tabla está vacía
+    # Insertar nuevos registros fijos si la tabla está vacía
     if count == 0:
         fixed_records = [
-            ("2025-04-10", "ModelA", "Line1", "Steel", 87.0, 3, 0.8, 73.0, "surface_crack", 100.0, 500),
-            ("2025-04-11", "ModelA", "Line2", "Aluminum", 95.0, 0, 0.5, 80.0, "none", 110.0, 400),
-            ("2025-04-12", "ModelB", "Line3", "Copper", 90.0, 1, 0.9, 73.0, "surface_scratch", 105.0, 600),
-            ("2025-04-13", "ModelB", "Line1", "Plastic", 95.0, 0, 0.5, 78.0, "surface_dent", 108.0, 450),
-            ("2025-04-14", "ModelC", "Line2", "Steel", 88.0, 4, 0.2, 80.0, "surface_crack", 95.0, 550),
-            ("2025-04-15", "ModelC", "Line3", "Aluminum", 97.0, 0, 0.9, 73.0, "none", 115.0, 380),
-            ("2025-04-16", "ModelA", "Line1", "Copper", 85.0, 1, 0.2, 72.0, "surface_scratch", 98.0, 520),
-            ("2025-04-17", "ModelB", "Line2", "Plastic", 91.0, 2, 0.4, 76.0, "surface_dent", 112.0, 470),
-            ("2025-04-18", "ModelC", "Line3", "Steel", 89.0, 1, 0.6, 72.0, "surface_crack", 102.0, 510)
+            ("2025-04-10", "ModelA", "Line1", "Steel", "BATCH101", 95.0, 2, 0.7, 75.0, "scratch", 90.0, 400),
+            ("2025-04-10", "ModelB", "Line2", "Aluminum", "BATCH102", 97.5, 1, 0.6, 70.0, "dent", 88.0, 350),
+            ("2025-04-11", "ModelC", "Line1", "Copper", "BATCH137", 87.0, 3, 0.8, 81.0, "crack", 85.0, 350),
+            ("2025-04-10", "ModelD", "Line3", "Plastic", "BATCH104", 97.5, 4, 0.9, 78.0, "warp", 87.0, 300),
+            ("2025-04-10", "ModelE", "Line2", "Brass", "BATCH105", 90.0, 2, 0.65, 72.0, "chip", 89.0, 320),
+            ("2025-04-10", "ModelF", "Line1", "Titanium", "BATCH106", 95.0, 2, 0.75, 76.0, "scratch", 91.0, 380),
+            ("2025-04-09", "ModelA", "Line1", "Steel", "BATCH107", 97.5, 1, 0.6, 74.0, "dent", 92.0, 410),
+            ("2025-04-09", "ModelB", "Line2", "Aluminum", "BATCH108", 92.0, 3, 0.8, 79.0, "crack", 86.0, 340),
+            ("2025-04-09", "ModelC", "Line1", "Copper", "BATCH109", 88.5, 4, 0.85, 82.0, "warp", 84.0, 360),
+            ("2025-04-09", "ModelD", "Line3", "Plastic", "BATCH110", 90.0, 2, 0.7, 77.0, "chip", 88.0, 310),
+            ("2025-04-09", "ModelE", "Line2", "Brass", "BATCH111", 99.0, 0, 0.5, 70.0, "none", 93.0, 330),
+            ("2025-04-09", "ModelF", "Line1", "Titanium", "BATCH112", 85.5, 5, 0.9, 80.0, "scratch", 83.0, 370),
+            ("2025-04-11", "ModelA", "Line1", "Steel", "BATCH113", 93.0, 1, 0.65, 73.0, "dent", 90.0, 390),
+            ("2025-04-11", "ModelB", "Line2", "Aluminum", "BATCH114", 96.5, 2, 0.7, 71.0, "crack", 89.0, 360),
+            ("2025-04-11", "ModelD", "Line3", "Plastic", "BATCH115", 89.0, 3, 0.8, 79.0, "warp", 86.0, 320),
         ]
         
         cursor.executemany("""
             INSERT INTO machines (
-                date, machine, production_line, material, uptime, defects,
+                date, machine, production_line, material, batch_id, uptime, defects,
                 vibration, temperature, defect_type, throughput, inventory_level
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, fixed_records)
     
-    # Crear tabla pdfs (sin cambios)
+    # Crear tabla pdfs
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pdfs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,28 +99,6 @@ def init_db():
 async def startup_event():
     init_db()
 
-# Endpoint para eventos (sin cambios)
-@app.post("/events/")
-async def create_event(event: Event):
-    MCP_URL = "http://mcp:8000/process_event"
-    
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(
-                MCP_URL,
-                json={
-                    "event_type": event.event_type,
-                    "description": event.description,
-                    "timestamp": event.timestamp.isoformat(),
-                    "equipment": event.equipment
-                }
-            )
-            if response.status_code != 200:
-                raise HTTPException(status_code=500, detail="Error al enviar evento al MCP")
-            return {"message": "Evento enviado al MCP exitosamente"}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
 # Endpoint para obtener todos los registros
 @app.get("/machines/")
 async def get_all_machines(
@@ -127,7 +110,7 @@ async def get_all_machines(
     cursor = conn.cursor()
     
     base_query = """
-        SELECT id, date, machine, production_line, material, uptime, defects,
+        SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
                vibration, temperature, defect_type, throughput, inventory_level
         FROM machines
     """
@@ -162,13 +145,14 @@ async def get_all_machines(
             "machine": row[2],
             "production_line": row[3],
             "material": row[4],
-            "uptime": row[5],
-            "defects": row[6],
-            "vibration": row[7],
-            "temperature": row[8],
-            "defect_type": row[9],
-            "throughput": row[10],
-            "inventory_level": row[11]
+            "batch_id": row[5],
+            "uptime": row[6],
+            "defects": row[7],
+            "vibration": row[8],
+            "temperature": row[9],
+            "defect_type": row[10],
+            "throughput": row[11],
+            "inventory_level": row[12]
         })
     conn.close()
     return machines
@@ -185,7 +169,7 @@ async def get_machine_records(
     cursor = conn.cursor()
     
     query = """
-        SELECT id, date, machine, production_line, material, uptime, defects,
+        SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
                vibration, temperature, defect_type, throughput, inventory_level
         FROM machines 
         WHERE machine = ?
@@ -220,13 +204,14 @@ async def get_machine_records(
             "machine": row[2],
             "production_line": row[3],
             "material": row[4],
-            "uptime": row[5],
-            "defects": row[6],
-            "vibration": row[7],
-            "temperature": row[8],
-            "defect_type": row[9],
-            "throughput": row[10],
-            "inventory_level": row[11]
+            "batch_id": row[5],
+            "uptime": row[6],
+            "defects": row[7],
+            "vibration": row[8],
+            "temperature": row[9],
+            "defect_type": row[10],
+            "throughput": row[11],
+            "inventory_level": row[12]
         })
     conn.close()
     
@@ -235,7 +220,7 @@ async def get_machine_records(
     
     return records
 
-# Endpoints para PDFs (sin cambios)
+# Endpoints para PDFs
 @app.post("/pdfs/")
 async def upload_pdf(file: UploadFile = File(...), description: str = Form(None)):
     if not file.filename.endswith(".pdf"):

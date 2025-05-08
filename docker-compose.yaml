@@ -1,11 +1,45 @@
 version: '3.8'
 
 services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.api
+    container_name: api
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./:/app
+
+
+  mcp:
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile.mcp
+    container_name: mcp
+    ports:
+      - "8000:8000"
+    depends_on:
+      - qdrant
+      - api
+      - open-webui
+    command: >
+      sh -c "pip install mcpo && mcpo --port 8000 -- mcp run src/main.py"
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
     volumes:
-      - ollama-data:/root/.ollama
+      - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
     restart: unless-stopped
@@ -15,46 +49,18 @@ services:
     container_name: open-webui
     ports:
       - "3001:8080"
-    volumes:
-      - open-webui-data:/app/backend/data
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
-      - OPENWEBUI_API_KEY=sk-d7fa4f5ce79e4990bfe9ec512b7c8c1e
+    volumes:
+      - openwebui_data:/app/backend/data
     depends_on:
-      - ollama 
-    restart: unless-stopped
+      - ollama
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    container_name: api
-    volumes:
-      - ./:/app
-    ports:
-      - "5000:5000"
-    environment:
-      - PYTHONUNBUFFERED=1
-    restart: unless-stopped
 
-  mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile.mcp
-    container_name: mcp
-    volumes:
-      - ./:/app
-    ports:
-      - "8000:8000"
-    depends_on:
-      - api
-      - open-webui
-    command: >
-      sh -c "pip install mcpo && mcpo --port 8000 -- mcp run src/main.py"
-    restart: unless-stopped
 
 volumes:
-  ollama-data:
-  open-webui-data:
+  qdrant_data:
+  openwebui_data:
+  ollama_data:
