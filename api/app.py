@@ -26,9 +26,8 @@ class MachineRecord(BaseModel):
 
 # Inicialización de la base de datos con registros fijos
 def init_db():
-    
-    db_path = "/app/database.db"
-    conn = sqlite3.connect(db_path)
+
+    conn = sqlite3.connect('database.db')
     cursor = conn.cursor()
     
     # Crear tabla machines con batch_id

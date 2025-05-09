@@ -26,6 +26,19 @@ qdrant_client = QdrantClient(host="qdrant", port=6333)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Función para obtener el siguiente point ID
+def get_next_point_id():
+    counter_file = "/app/point_id_counter.txt"
+    try:
+        with open(counter_file, "r") as f:
+            counter = int(f.read())
+    except:
+        counter = 0
+    counter += 1
+    with open(counter_file, "w") as f:
+        f.write(str(counter))
+    return counter
+
 # Modelo para validar filtros de tiempo
 class TimeFilter(BaseModel):
     start_date: Optional[str] = None
@@ -214,6 +227,7 @@ async def fetch_mes_data(
             response = await client.get(endpoint, params=params)
             response.raise_for_status()
             logs = response.json()
+            logger.info(f"Datos MES recuperados: {logs}")
 
             # Filtrar por key values
             if key_values:
@@ -381,7 +395,7 @@ async def load_sop(ctx: Context, key_value: str, key_type: str = "machine") -> s
             )
 
         # Almacenar en Qdrant
-        sop_id = f"sop_{key_type}_{key_value}"
+        sop_id = get_next_point_id()
         sop_text = json.dumps(rules)
         embedding = model.encode(pdf_content).tolist()
         qdrant_client.upsert(
@@ -471,6 +485,7 @@ async def analyze_compliance(
             response = await client.get(endpoint, params=params)
             response.raise_for_status()
             logs = response.json()
+            logger.info(f"Datos MES recuperados para {key_values.get('machine', 'todas las máquinas')}: {logs}")
 
             # Filtrar por key values
             if key_values:
@@ -508,9 +523,18 @@ async def analyze_compliance(
             
             if search_result[0]:
                 rules = search_result[0][0].payload["rules"]
+                logger.info(f"Reglas SOP cargadas para {machine}: {rules}")
             else:
                 # Intentar cargar el PDF
-                await load_sop(ctx, key_value=machine, key_type="machine")
+                sop_result = await load_sop(ctx, key_value=machine, key_type="machine")
+                if "Éxito" not in sop_result:
+                    return (
+                        "Análisis de Cumplimiento\n"
+                        "=======================\n"
+                        "Estado: Error\n"
+                        f"Mensaje: No se pudo cargar el PDF SOP para {machine}.\n"
+                        f"Detalles: {sop_result}"
+                    )
                 search_result = qdrant_client.scroll(
                     collection_name="sop_pdfs",
                     scroll_filter=models.Filter(
@@ -524,6 +548,7 @@ async def analyze_compliance(
                 )
                 if search_result[0]:
                     rules = search_result[0][0].payload["rules"]
+                    logger.info(f"Reglas SOP cargadas tras load_sop para {machine}: {rules}")
 
         if not rules:
             return (
@@ -544,10 +569,19 @@ async def analyze_compliance(
                 "issues": []
             }
             for figure in key_figures or rules.keys():
-                if figure not in log or figure not in rules:
+                rule = rules.get(figure)
+                if not rule:
+                    logger.info(f"No hay regla SOP para {figure}")
+                    continue  # Ignorar métricas sin reglas SOP
+                # Verificar si la métrica está presente en el registro
+                if figure not in log or log[figure] is None:
+                    entry["compliance_status"] = "Non-Compliant"
+                    entry["issues"].append(f"{figure}: No registrado")
+                    entry[figure] = "N/A"
+                    logger.info(f"{figure} no registrado en log: {log}")
                     continue
                 value = log[figure]
-                rule = rules[figure]
+                logger.info(f"Evaluando {figure}: valor={value}, regla={rule}")
                 compliant = True
                 issue = None
                 
