@@ -25,8 +25,6 @@ services:
         condition: service_started
       ollama:
         condition: service_started
-    environment:
-      - MCP_ENDPOINT=http://mcp:8000
     command: >
       sh -c "pip install mcpo && mcpo --port 8000 -- python src/main.py"
     restart: unless-stopped
@@ -61,7 +59,6 @@ services:
       - "3001:8080"
     environment:
       - OLLAMA_API_BASE_URL=http://ollama:11434
-      - MCP_ENDPOINT=http://mcp:8000
     volumes:
       - openwebui_data:/app/backend/data
     depends_on:

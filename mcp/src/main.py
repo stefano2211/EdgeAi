@@ -9,37 +9,25 @@ from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 import json
+import hashlib
 
 # Inicializar FastMCP
-mcp = FastMCP("Dynamic MES Compliance Analysis")
+mcp = FastMCP("MES Compliance Processor")
 
-# Configuración de URLs
+# Configuración
 API_URL = "http://api:5000"
-
-# Modelo de embeddings
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Cliente de Qdrant
-qdrant_client = QdrantClient(host="qdrant", port=6333)
+# Inicializar Qdrant con configuración optimizada
+qdrant_client = QdrantClient(
+    host="qdrant",
+    port=6333,
+)
 
-# Configuración de logging
+# Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Función para obtener el siguiente point ID
-def get_next_point_id():
-    counter_file = "/app/point_id_counter.txt"
-    try:
-        with open(counter_file, "r") as f:
-            counter = int(f.read())
-    except:
-        counter = 0
-    counter += 1
-    with open(counter_file, "w") as f:
-        f.write(str(counter))
-    return counter
-
-# Modelo para validar filtros de tiempo
 class TimeFilter(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -49,142 +37,108 @@ class TimeFilter(BaseModel):
         try:
             if self.specific_date:
                 datetime.strptime(self.specific_date, "%Y-%m-%d")
-                self.start_date = None
-                self.end_date = None
             else:
                 if self.start_date:
                     datetime.strptime(self.start_date, "%Y-%m-%d")
                 if self.end_date:
                     datetime.strptime(self.end_date, "%Y-%m-%d")
                 if self.start_date and self.end_date and self.start_date > self.end_date:
-                    raise ValueError("La fecha de inicio no puede ser mayor que la fecha de fin")
+                    raise ValueError("Start date cannot be after end date")
         except ValueError as e:
-            raise ValueError(f"Formato de fecha inválido. Use YYYY-MM-DD: {str(e)}")
+            raise ValueError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}")
 
-# Función para inferir key figures y key values
-async def infer_fields():
+def init_collections():
+    """Inicializa las colecciones en Qdrant con configuraciones optimizadas"""
+    try:
+        # Configuración para registros MES
+        qdrant_client.recreate_collection(
+            collection_name="mes_logs",
+            vectors_config=models.VectorParams(
+                size=384,
+                distance=models.Distance.COSINE
+            ),
+            optimizers_config=models.OptimizersConfigDiff(
+                indexing_threshold=20000,
+                memmap_threshold=20000
+            )
+        )
+
+        # Configuración para PDFs SOP
+        qdrant_client.recreate_collection(
+            collection_name="sop_pdfs",
+            vectors_config=models.VectorParams(
+                size=384,
+                distance=models.Distance.COSINE
+            ),
+            optimizers_config=models.OptimizersConfigDiff(
+                indexing_threshold=0,
+                memmap_threshold=20000
+            )
+        )
+        logger.info("Colecciones de Qdrant inicializadas")
+    except Exception as e:
+        logger.error(f"Error inicializando Qdrant: {str(e)}")
+        raise
+
+@mcp.tool()
+async def list_fields(ctx: Context) -> str:
+    """Lista los campos disponibles y valores únicos"""
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{API_URL}/machines/")
             response.raise_for_status()
             records = response.json()
-            
+
             if not records:
-                return {"key_figures": [], "key_values": [], "available_values": {}}
-            
-            # Obtener todas las claves del primer registro
-            sample_record = records[0]
-            all_fields = set(sample_record.keys()) - {"id"}  # Excluir 'id'
-            
+                return json.dumps({
+                    "status": "no_data",
+                    "message": "No se encontraron registros",
+                    "fields": []
+                })
+
             # Clasificar campos
-            key_figures = []
-            key_values = []
-            
-            for field in all_fields:
-                # Verificar el tipo de valor en todos los registros
-                is_numeric = all(
-                    isinstance(record[field], (int, float))
-                    for record in records
-                    if field in record
-                )
-                is_string = all(
-                    isinstance(record[field], str)
-                    for record in records
-                    if field in record
-                )
-                
-                if is_numeric:
-                    key_figures.append(field)
-                elif is_string:
-                    key_values.append(field)
-            
-            # Obtener valores únicos para key values
-            available_values = {}
-            for key in key_values:
-                values = sorted(set(record[key] for record in records if key in record))
-                available_values[key] = values
-            
-            return {
-                "key_figures": sorted(key_figures),
-                "key_values": sorted(key_values),
-                "available_values": available_values
+            sample = records[0]
+            fields = {
+                "numeric": [],
+                "categorical": []
             }
-    except Exception as e:
-        logger.error(f"Error al inferir campos: {str(e)}")
-        return {"key_figures": [], "key_values": [], "available_values": {}}
 
-# Inicializar colecciones en Qdrant
-def init_qdrant():
-    try:
-        qdrant_client.recreate_collection(
-            collection_name="mes_logs",
-            vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE)
-        )
-        qdrant_client.recreate_collection(
-            collection_name="sop_pdfs",
-            vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE)
-        )
-        logger.info("Colecciones de Qdrant inicializadas: mes_logs, sop_pdfs")
-    except Exception as e:
-        logger.error(f"Error al inicializar Qdrant: {str(e)}")
+            for field, value in sample.items():
+                if field == "id":
+                    continue
+                if isinstance(value, (int, float)):
+                    fields["numeric"].append(field)
+                elif isinstance(value, str):
+                    fields["categorical"].append(field)
 
-@mcp.tool()
-async def list_fields(ctx: Context) -> str:
-    """
-    Lista los key figures y key values inferidos de los registros MES, con valores únicos.
-    """
-    try:
-        fields = await infer_fields()
-        key_figures = fields["key_figures"]
-        key_values = fields["key_values"]
-        available_values = fields["available_values"]
-        
-        if not key_figures and not key_values:
-            return (
-                "Lista de Campos\n"
-                "==============\n"
-                "Estado: Sin datos\n"
-                "Mensaje: No se encontraron registros MES para inferir campos."
-            )
-        
-        report = [
-            "Lista de Campos Disponibles",
-            "==========================",
-            "",
-            "Key Figures (Métricas Cuantitativas)",
-            "-----------------------------------",
-            ", ".join(key_figures) if key_figures else "Ninguno",
-            "",
-            "Key Values (Datos Cualitativos)",
-            "------------------------------"
-        ]
-        
-        for key, values in available_values.items():
-            report.append(f"{key}: {', '.join(map(str, values))}")
-        
-        return "\n".join(report)
+            # Obtener valores únicos
+            unique_values = {}
+            for field in fields["categorical"]:
+                values = sorted({record[field] for record in records if field in record})
+                unique_values[field] = values
+
+            return json.dumps({
+                "status": "success",
+                "fields": fields,
+                "unique_values": unique_values
+            }, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error en list_fields: {str(e)}")
-        return (
-            "Lista de Campos\n"
-            "==============\n"
-            "Estado: Error\n"
-            f"Mensaje: No se pudo obtener los campos.\n"
-            f"Detalles: {str(e)}"
-        )
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, ensure_ascii=False)
 
 @mcp.tool()
 async def fetch_mes_data(
     ctx: Context,
-    key_values: Dict[str, str] = None,
-    key_figures: List[str] = None,
+    machine: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
+    specific_date: Optional[str] = None,
+    fields: Optional[List[str]] = None
 ) -> str:
-    """
-    Recupera datos MES filtrados por key values y seleccionando key figures específicos.
-    """
+    """Obtiene datos del MES incluyendo ID de registro"""
     try:
         time_filter = TimeFilter(
             start_date=start_date,
@@ -192,23 +146,6 @@ async def fetch_mes_data(
             specific_date=specific_date
         )
         time_filter.validate_dates()
-
-        # Obtener estructura de campos
-        fields = await infer_fields()
-        valid_key_figures = fields["key_figures"]
-        valid_key_values = fields["key_values"]
-
-        # Validar key figures
-        if key_figures:
-            invalid_figures = [f for f in key_figures if f not in valid_key_figures]
-            if invalid_figures:
-                raise ValueError(f"Key figures inválidos: {', '.join(invalid_figures)}. Opciones válidas: {', '.join(valid_key_figures)}")
-
-        # Validar key values
-        if key_values:
-            invalid_keys = [k for k in key_values.keys() if k not in valid_key_values]
-            if invalid_keys:
-                raise ValueError(f"Key values inválidos: {', '.join(invalid_keys)}. Opciones válidas: {', '.join(valid_key_values)}")
 
         params = {}
         if time_filter.specific_date:
@@ -219,229 +156,176 @@ async def fetch_mes_data(
             if time_filter.end_date:
                 params["end_date"] = time_filter.end_date
 
+        endpoint = f"{API_URL}/machines/{machine}" if machine else f"{API_URL}/machines/"
+
         async with httpx.AsyncClient() as client:
-            endpoint = f"{API_URL}/machines/"
-            if key_values and "machine" in key_values:
-                endpoint = f"{API_URL}/machines/{key_values['machine']}"
-            
             response = await client.get(endpoint, params=params)
             response.raise_for_status()
-            logs = response.json()
-            logger.info(f"Datos MES recuperados: {logs}")
+            data = response.json()
 
-            # Filtrar por key values
-            if key_values:
-                for key, value in key_values.items():
-                    if key != "machine":  # machine ya se filtró en el endpoint
-                        logs = [log for log in logs if log.get(key) == value]
+            # Asegurar que el ID siempre esté incluido
+            processed_data = []
+            for record in data:
+                processed_record = {
+                    "id": record["id"],  # Incluir ID siempre
+                    "date": record["date"],
+                    "machine": record["machine"]
+                }
+                
+                # Agregar campos solicitados o todos los numéricos si no se especifican
+                if fields:
+                    for field in fields:
+                        if field in record:
+                            processed_record[field] = record[field]
+                else:
+                    # Si no se especifican campos, incluir todos los numéricos
+                    fields_info = json.loads(await list_fields(ctx))
+                    if fields_info["status"] == "success":
+                        numeric_fields = fields_info["fields"]["numeric"]
+                        for field in numeric_fields:
+                            if field in record:
+                                processed_record[field] = record[field]
 
-            # Seleccionar solo key figures solicitados
-            if key_figures:
-                filtered_logs = []
-                for log in logs:
-                    filtered_log = {"id": log["id"], "date": log["date"], "machine": log["machine"]}
-                    for figure in key_figures:
-                        if figure in log:
-                            filtered_log[figure] = log[figure]
-                    filtered_logs.append(filtered_log)
-                logs = filtered_logs
+                processed_data.append(processed_record)
 
-            # Almacenar en Qdrant
-            for log in logs:
-                log_id = f"mes_log_{log['id']}"
-                log_text = json.dumps(log)
-                embedding = model.encode(log_text).tolist()
+            # Indexar en Qdrant
+            points = []
+            for record in processed_data:
+                record_text = json.dumps(record)
+                point_id = hashlib.md5(record_text.encode()).hexdigest()
+                points.append(
+                    models.PointStruct(
+                        id=point_id,
+                        vector=model.encode(record_text).tolist(),
+                        payload=record
+                    )
+                )
+
+            if points:
                 qdrant_client.upsert(
                     collection_name="mes_logs",
-                    points=[
-                        models.PointStruct(
-                            id=log_id,
-                            vector=embedding,
-                            payload=log
-                        )
-                    ]
+                    points=points
                 )
 
-            if not logs:
-                period = specific_date or f"{start_date} a {end_date}"
-                filter_text = "\n".join([f"{k}: {v}" for k, v in (key_values or {}).items()]) or "Ninguno"
-                return (
-                    "Datos MES\n"
-                    "========\n"
-                    f"Período: {period}\n"
-                    f"Filtros Aplicados:\n{filter_text}\n"
-                    "Estado: Sin datos\n"
-                    "Mensaje: No se encontraron registros con los filtros especificados."
-                )
-
-            # Generar tabla en markdown
-            headers = ["Date", "Machine"] + (key_figures or [])
-            table = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
-            for log in logs:
-                row = [log["date"], log["machine"]]
-                for figure in key_figures or []:
-                    value = log.get(figure, "N/A")
-                    row.append(str(value))
-                table.append("| " + " | ".join(row) + " |")
-
-            report = [
-                "Datos MES",
-                "========",
-                f"Período: {specific_date or f'{start_date} a {end_date}'}",
-                f"Registros Encontrados: {len(logs)}",
-                "",
-                *table
-            ]
-            return "\n".join(report)
+            return json.dumps({
+                "status": "success",
+                "count": len(processed_data),
+                "data": processed_data
+            }, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error en fetch_mes_data: {str(e)}")
-        return (
-            "Datos MES\n"
-            "========\n"
-            "Estado: Error\n"
-            f"Mensaje: No se pudo recuperar los datos.\n"
-            f"Detalles: {str(e)}"
-        )
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, ensure_ascii=False)
+
 
 @mcp.tool()
-async def load_sop(ctx: Context, key_value: str, key_type: str = "machine") -> str:
-    """
-    Carga un PDF SOP asociado con un key value y lo almacena en Qdrant.
-    """
+async def load_sop(ctx: Context, machine: str) -> str:
+    """Carga y procesa un PDF SOP para una máquina específica con mejor extracción de reglas"""
     try:
-        # Obtener key values válidos
-        fields = await infer_fields()
-        valid_key_values = fields["key_values"]
-        
-        # Validar key_type
-        if key_type not in valid_key_values:
-            raise ValueError(f"Key type inválido: {key_type}. Opciones válidas: {', '.join(valid_key_values)}")
-
-        # Construir nombre del PDF (e.g., ModelA.pdf)
-        pdf_name = f"{key_value}.pdf"
-        
-        # Verificar si el PDF ya está en Qdrant
-        search_result = qdrant_client.scroll(
+        # Verificar si ya existe
+        existing = qdrant_client.scroll(
             collection_name="sop_pdfs",
             scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="filename",
-                        match=models.MatchValue(value=pdf_name)
-                    )
-                ]
-            )
+                must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]
+            ),
+            limit=1
         )
-        
-        if search_result[0]:
-            return (
-                "Carga de SOP\n"
-                "===========\n"
-                f"Estado: Ya existe\n"
-                f"Mensaje: El PDF '{pdf_name}' ya está almacenado en Qdrant."
-            )
 
-        # Obtener lista de PDFs disponibles
+        if existing[0]:
+            return json.dumps({
+                "status": "exists",
+                "machine": machine,
+                "rules": existing[0][0].payload["rules"]
+            }, ensure_ascii=False)
+
+        # Obtener contenido del PDF
+        pdf_name = f"{machine}.pdf"
         async with httpx.AsyncClient() as client:
-            pdf_list_response = await client.get(f"{API_URL}/pdfs/list")
-            pdf_list = pdf_list_response.json()
+            # Verificar existencia
+            list_response = await client.get(f"{API_URL}/pdfs/list")
+            if not any(pdf["filename"] == pdf_name for pdf in list_response.json()):
+                return json.dumps({
+                    "status": "error",
+                    "message": f"PDF {pdf_name} no encontrado"
+                }, ensure_ascii=False)
 
-            if not any(pdf["filename"] == pdf_name for pdf in pdf_list):
-                return (
-                    "Carga de SOP\n"
-                    "===========\n"
-                    "Estado: Error\n"
-                    f"Mensaje: No se encontró el PDF '{pdf_name}'.\n"
-                    f"PDFs disponibles: {', '.join([pdf['filename'] for pdf in pdf_list])}"
-                )
-
-            # Obtener contenido del PDF
+            # Obtener contenido
             content_response = await client.get(
                 f"{API_URL}/pdfs/content/",
-                params={"filenames": [pdf_name]}
+                params={"filenames": [pdf_name], "max_length": 10000}
             )
-            content_response.raise_for_status()
-            pdf_content = content_response.json()["pdfs"][0]["content"]
+            content = content_response.json()["pdfs"][0]["content"]
 
-        # Obtener key figures válidos
-        valid_key_figures = fields["key_figures"]
-
-        # Extraer reglas SOP
+        # Patrones mejorados para extracción exacta de reglas
         rules = {}
         patterns = [
-            (r"uptime\s*[>=≥]+\s*(\d+\.?\d*)\s*%", "uptime", ">="),
-            (r"defects\s*[<=≤]+\s*(\d+)", "defects", "<="),
-            (r"vibration\s*[<=≤]+\s*(\d+\.?\d*)\s*(?:mm/s|mm\s*/\s*s)", "vibration", "<="),
-            (r"temperature\s*[<=≤]+\s*(\d+\.?\d*)\s*(?:°C|C)", "temperature", "<="),
-            (r"throughput\s*[>=≥]+\s*(\d+\.?\d*)\s*%", "throughput", ">="),
-            (r"inventory\s*level\s*[>=≥]+\s*(\d+)", "inventory_level", ">=")
+            (r"(uptime|tiempo de actividad)[^\d]*([>=≥]+)[^\d]*(\d+)\s*%", "uptime", ">="),
+            (r"(defects|defectos|number of defects)[^\d]*([<=≤]+)[^\d]*(\d+)", "defects", "<="),
+            (r"(temperature|temperatura)[^\d]*([<=≤]+)[^\d]*(\d+)\s*°?C?", "temperature", "<="),
+            (r"(throughput|rendimiento|production throughput)[^\d]*([>=≥]+)[^\d]*(\d+)", "throughput", ">=")
         ]
-        
-        for pattern, key, operator in patterns:
-            if key not in valid_key_figures:
-                continue  # Ignorar reglas para key figures no válidos
-            match = re.search(pattern, pdf_content, re.IGNORECASE)
+
+        for pattern, field, operator in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
             if match:
-                rules[key] = {"value": float(match.group(1)), "operator": operator}
+                try:
+                    value = float(match.group(3))
+                    rules[field] = {
+                        "value": value,
+                        "operator": operator,
+                        "rule_text": f"{field} {operator} {value}" + 
+                                    ("%" if field == "uptime" else "" + 
+                                     ("°C" if field == "temperature" else ""))
+                    }
+                except ValueError:
+                    continue
 
         if not rules:
-            return (
-                "Carga de SOP\n"
-                "===========\n"
-                "Estado: Error\n"
-                f"Mensaje: No se encontraron reglas SOP válidas en '{pdf_name}'.\n"
-                f"Key figures válidos: {', '.join(valid_key_figures)}\n"
-                "Recomendación: Asegure que el PDF contenga reglas como 'uptime >= 95%'."
-            )
+            return json.dumps({
+                "status": "error",
+                "message": "No se encontraron reglas en el PDF"
+            }, ensure_ascii=False)
 
         # Almacenar en Qdrant
-        sop_id = get_next_point_id()
-        sop_text = json.dumps(rules)
-        embedding = model.encode(pdf_content).tolist()
+        embedding = model.encode(content).tolist()
         qdrant_client.upsert(
             collection_name="sop_pdfs",
-            points=[
-                models.PointStruct(
-                    id=sop_id,
-                    vector=embedding,
-                    payload={
-                        "filename": pdf_name,
-                        key_type: key_value,
-                        "rules": rules
-                    }
-                )
-            ]
+            points=[models.PointStruct(
+                id=hashlib.md5(machine.encode()).hexdigest(),
+                vector=embedding,
+                payload={
+                    "filename": pdf_name,
+                    "machine": machine,
+                    "rules": rules
+                }
+            )]
         )
 
-        return (
-            "Carga de SOP\n"
-            "===========\n"
-            "Estado: Éxito\n"
-            f"Mensaje: El PDF '{pdf_name}' fue cargado y almacenado en Qdrant.\n"
-            f"Reglas extraídas: {sop_text}"
-        )
+        return json.dumps({
+            "status": "success",
+            "machine": machine,
+            "rules": rules
+        }, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error en load_sop: {str(e)}")
-        return (
-            "Carga de SOP\n"
-            "===========\n"
-            "Estado: Error\n"
-            f"Mensaje: No se pudo cargar el PDF '{pdf_name}'.\n"
-            f"Detalles: {str(e)}"
-        )
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, ensure_ascii=False)
 
 @mcp.tool()
 async def analyze_compliance(
     ctx: Context,
-    key_values: Dict[str, str] = None,
-    key_figures: List[str] = None,
+    machine: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
+    specific_date: Optional[str] = None,
+    focus_numeric_fields: Optional[List[str]] = None,
+    categorical_filters: Optional[Dict[str, str]] = None
 ) -> str:
-    """
-    Analiza el cumplimiento de los registros MES contra las reglas SOP.
-    """
+    """Analiza cumplimiento para cualquier combinación de campos con manejo automático de SOPs"""
     try:
         time_filter = TimeFilter(
             start_date=start_date,
@@ -450,190 +334,108 @@ async def analyze_compliance(
         )
         time_filter.validate_dates()
 
-        # Obtener estructura de campos
-        fields = await infer_fields()
-        valid_key_figures = fields["key_figures"]
-        valid_key_values = fields["key_values"]
+        # Obtener todos los campos y máquinas disponibles
+        fields_info = json.loads(await list_fields(ctx))
+        if fields_info["status"] != "success":
+            return json.dumps({
+                "status": "error",
+                "message": "No se pudieron obtener los campos disponibles"
+            }, ensure_ascii=False)
 
-        # Validar key figures
-        if key_figures:
-            invalid_figures = [f for f in key_figures if f not in valid_key_figures]
-            if invalid_figures:
-                raise ValueError(f"Key figures inválidos: {', '.join(invalid_figures)}. Opciones válidas: {', '.join(valid_key_figures)}")
+        # Determinar máquinas a analizar
+        all_machines = fields_info["unique_values"].get("machine", [])
+        target_machines = [machine] if machine else all_machines
 
-        # Validar key values
-        if key_values:
-            invalid_keys = [k for k in key_values.keys() if k not in valid_key_values]
-            if invalid_keys:
-                raise ValueError(f"Key values inválidos: {', '.join(invalid_keys)}. Opciones válidas: {', '.join(valid_key_values)}")
-
-        # Obtener registros MES
-        params = {}
-        if time_filter.specific_date:
-            params["specific_date"] = time_filter.specific_date
-        else:
-            if time_filter.start_date:
-                params["start_date"] = time_filter.start_date
-            if time_filter.end_date:
-                params["end_date"] = time_filter.end_date
-
-        async with httpx.AsyncClient() as client:
-            endpoint = f"{API_URL}/machines/"
-            if key_values and "machine" in key_values:
-                endpoint = f"{API_URL}/machines/{key_values['machine']}"
-            
-            response = await client.get(endpoint, params=params)
-            response.raise_for_status()
-            logs = response.json()
-            logger.info(f"Datos MES recuperados para {key_values.get('machine', 'todas las máquinas')}: {logs}")
-
-            # Filtrar por key values
-            if key_values:
-                for key, value in key_values.items():
-                    if key != "machine":
-                        logs = [log for log in logs if log.get(key) == value]
-
-            if not logs:
-                period = specific_date or f"{start_date} a {end_date}"
-                filter_text = "\n".join([f"{k}: {v}" for k, v in (key_values or {}).items()]) or "Ninguno"
-                return (
-                    "Análisis de Cumplimiento\n"
-                    "=======================\n"
-                    f"Período: {period}\n"
-                    f"Filtros Aplicados:\n{filter_text}\n"
-                    "Estado: Sin datos\n"
-                    "Mensaje: No se encontraron registros con los filtros especificados."
-                )
-
-        # Obtener reglas SOP desde Qdrant
-        rules = {}
-        if key_values and "machine" in key_values:
-            machine = key_values["machine"]
-            search_result = qdrant_client.scroll(
-                collection_name="sop_pdfs",
-                scroll_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="machine",
-                            match=models.MatchValue(value=machine)
-                        )
-                    ]
-                )
-            )
-            
-            if search_result[0]:
-                rules = search_result[0][0].payload["rules"]
-                logger.info(f"Reglas SOP cargadas para {machine}: {rules}")
+        # Cargar reglas SOP para todas las máquinas relevantes
+        machines_rules = {}
+        for machine_name in target_machines:
+            sop_result = json.loads(await load_sop(ctx, machine_name))
+            if sop_result["status"] in ["success", "exists"]:
+                machines_rules[machine_name] = sop_result.get("rules", {})
             else:
-                # Intentar cargar el PDF
-                sop_result = await load_sop(ctx, key_value=machine, key_type="machine")
-                if "Éxito" not in sop_result:
-                    return (
-                        "Análisis de Cumplimiento\n"
-                        "=======================\n"
-                        "Estado: Error\n"
-                        f"Mensaje: No se pudo cargar el PDF SOP para {machine}.\n"
-                        f"Detalles: {sop_result}"
-                    )
-                search_result = qdrant_client.scroll(
-                    collection_name="sop_pdfs",
-                    scroll_filter=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="machine",
-                                match=models.MatchValue(value=machine)
-                            )
-                        ]
-                    )
-                )
-                if search_result[0]:
-                    rules = search_result[0][0].payload["rules"]
-                    logger.info(f"Reglas SOP cargadas tras load_sop para {machine}: {rules}")
+                machines_rules[machine_name] = {"status": "no_sop"}
 
-        if not rules:
-            return (
-                "Análisis de Cumplimiento\n"
-                "=======================\n"
-                "Estado: Error\n"
-                "Mensaje: No se encontraron reglas SOP para la máquina especificada.\n"
-                "Recomendación: Cargue el PDF SOP correspondiente."
-            )
+        # Determinar campos numéricos a analizar
+        if not focus_numeric_fields:
+            focus_numeric_fields = fields_info["fields"]["numeric"]
 
-        # Analizar cumplimiento
-        compliance_report = []
-        for log in logs:
-            entry = {
-                "date": log["date"],
-                "machine": log["machine"],
-                "compliance_status": "Compliant",
-                "issues": []
-            }
-            for figure in key_figures or rules.keys():
-                rule = rules.get(figure)
-                if not rule:
-                    logger.info(f"No hay regla SOP para {figure}")
-                    continue  # Ignorar métricas sin reglas SOP
-                # Verificar si la métrica está presente en el registro
-                if figure not in log or log[figure] is None:
-                    entry["compliance_status"] = "Non-Compliant"
-                    entry["issues"].append(f"{figure}: No registrado")
-                    entry[figure] = "N/A"
-                    logger.info(f"{figure} no registrado en log: {log}")
-                    continue
-                value = log[figure]
-                logger.info(f"Evaluando {figure}: valor={value}, regla={rule}")
-                compliant = True
-                issue = None
-                
-                if rule["operator"] == ">=" and value < rule["value"]:
-                    compliant = False
-                    issue = f"{figure}: {value} < {rule['value']}"
-                elif rule["operator"] == "<=" and value > rule["value"]:
-                    compliant = False
-                    issue = f"{figure}: {value} > {rule['value']}"
-                
-                if not compliant:
-                    entry["compliance_status"] = "Non-Compliant"
-                    entry["issues"].append(issue)
-                
-                entry[figure] = value
-            
-            compliance_report.append(entry)
+        # Obtener datos para todas las máquinas objetivo
+        all_results = []
+        for machine_name in target_machines:
+            fetch_result = json.loads(await fetch_mes_data(
+                ctx,
+                machine=machine_name,
+                start_date=start_date,
+                end_date=end_date,
+                specific_date=specific_date,
+                fields=list(set(focus_numeric_fields + ["id", "date", "machine"] + (list(categorical_filters.keys()) if categorical_filters else [])))
+            ))
 
-        # Generar tabla en markdown
-        headers = ["Date", "Machine"] + (key_figures or list(rules.keys())) + ["Compliance Status", "Issues"]
-        table = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
-        for entry in compliance_report:
-            row = [entry["date"], entry["machine"]]
-            for figure in key_figures or rules.keys():
-                value = str(entry.get(figure, "N/A"))
-                row.append(value)
-            row.append(entry["compliance_status"])
-            row.append(", ".join(entry["issues"]) or "None")
-            table.append("| " + " | ".join(row) + " |")
+            if fetch_result["status"] != "success":
+                continue
 
-        period = specific_date or f"{start_date} a {end_date}"
-        filter_text = "\n".join([f"{k}: {v}" for k, v in (key_values or {}).items()]) or "Ninguno"
-        report = [
-            "Análisis de Cumplimiento",
-            "=======================",
-            f"Período: {period}",
-            f"Filtros Aplicados:\n{filter_text}",
-            f"Registros Analizados: {len(compliance_report)}",
-            "",
-            *table
-        ]
-        return "\n".join(report)
+            # Aplicar filtros categóricos
+            filtered_data = []
+            for record in fetch_result["data"]:
+                match = True
+                if categorical_filters:
+                    for field, value in categorical_filters.items():
+                        if record.get(field) != value:
+                            match = False
+                            break
+                if match:
+                    filtered_data.append(record)
+
+            # Preparar resultados para esta máquina
+            for record in filtered_data:
+                entry = {
+                    "id": record["id"],
+                    "date": record["date"],
+                    "machine": record["machine"],
+                    "metrics": {},
+                    "compliance_rules": {},
+                    "categorical_data": {},
+                    "sop_status": "available" if machines_rules[machine_name].get("status") != "no_sop" else "not_available"
+                }
+
+                # Campos numéricos y reglas
+                for field in focus_numeric_fields:
+                    if field in record:
+                        entry["metrics"][field] = record[field]
+                        if machines_rules[machine_name].get(field):
+                            entry["compliance_rules"][field] = machines_rules[machine_name][field]["rule_text"]
+                        else:
+                            entry["compliance_rules"][field] = "no_rule_defined"
+
+                # Campos categóricos
+                if categorical_filters:
+                    for field in categorical_filters.keys():
+                        if field in record:
+                            entry["categorical_data"][field] = record[field]
+
+                all_results.append(entry)
+
+        return json.dumps({
+            "status": "success",
+            "period": specific_date or f"{start_date} a {end_date}",
+            "machine_filter": machine or "all_machines",
+            "numeric_fields_analyzed": focus_numeric_fields,
+            "categorical_filters": categorical_filters or {},
+            "sop_summary": {
+                "machines_with_sop": sum(1 for rules in machines_rules.values() if rules.get("status") != "no_sop"),
+                "machines_without_sop": sum(1 for rules in machines_rules.values() if rules.get("status") == "no_sop")
+            },
+            "analysis_note": "Verifique 'sop_status' en cada registro. Campos sin reglas mostrarán 'no_rule_defined'",
+            "results": all_results
+        }, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error en analyze_compliance: {str(e)}")
-        return (
-            "Análisis de Cumplimiento\n"
-            "=======================\n"
-            "Estado: Error\n"
-            f"Mensaje: No se pudo realizar el análisis.\n"
-            f"Detalles: {str(e)}"
-        )
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, ensure_ascii=False)
 
 if __name__ == "__main__":
-    init_qdrant()
+    # Inicializar Qdrant al iniciar
+    init_collections()
     mcp.run()
