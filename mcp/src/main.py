@@ -18,11 +18,8 @@ mcp = FastMCP("MES Compliance Processor")
 API_URL = "http://api:5000"
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Inicializar Qdrant con configuración optimizada
-qdrant_client = QdrantClient(
-    host="qdrant",
-    port=6333,
-)
+# Inicializar Qdrant
+qdrant_client = QdrantClient(host="qdrant", port=6333)
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -48,32 +45,16 @@ class TimeFilter(BaseModel):
             raise ValueError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}")
 
 def init_collections():
-    """Inicializa las colecciones en Qdrant con configuraciones optimizadas"""
     try:
-        # Configuración para registros MES
         qdrant_client.recreate_collection(
             collection_name="mes_logs",
-            vectors_config=models.VectorParams(
-                size=384,
-                distance=models.Distance.COSINE
-            ),
-            optimizers_config=models.OptimizersConfigDiff(
-                indexing_threshold=20000,
-                memmap_threshold=20000
-            )
+            vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
+            optimizers_config=models.OptimizersConfigDiff(indexing_threshold=20000, memmap_threshold=20000)
         )
-
-        # Configuración para PDFs SOP
         qdrant_client.recreate_collection(
             collection_name="sop_pdfs",
-            vectors_config=models.VectorParams(
-                size=384,
-                distance=models.Distance.COSINE
-            ),
-            optimizers_config=models.OptimizersConfigDiff(
-                indexing_threshold=0,
-                memmap_threshold=20000
-            )
+            vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
+            optimizers_config=models.OptimizersConfigDiff(indexing_threshold=0, memmap_threshold=20000)
         )
         logger.info("Colecciones de Qdrant inicializadas")
     except Exception as e:
@@ -81,8 +62,17 @@ def init_collections():
         raise
 
 @mcp.tool()
+async def list_available_tools(ctx: Context) -> str:
+    """Lista las herramientas MCP disponibles"""
+    try:
+        tools = [t.__name__ for t in mcp.tools]
+        return json.dumps({"status": "success", "tools": tools}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error en list_available_tools: {str(e)}")
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+@mcp.tool()
 async def list_fields(ctx: Context) -> str:
-    """Lista los campos disponibles y valores únicos"""
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{API_URL}/machines/")
@@ -90,19 +80,10 @@ async def list_fields(ctx: Context) -> str:
             records = response.json()
 
             if not records:
-                return json.dumps({
-                    "status": "no_data",
-                    "message": "No se encontraron registros",
-                    "fields": []
-                })
+                return json.dumps({"status": "no_data", "message": "No se encontraron registros", "fields": []})
 
-            # Clasificar campos
             sample = records[0]
-            fields = {
-                "numeric": [],
-                "categorical": []
-            }
-
+            fields = {"numeric": [], "categorical": []}
             for field, value in sample.items():
                 if field == "id":
                     continue
@@ -111,23 +92,15 @@ async def list_fields(ctx: Context) -> str:
                 elif isinstance(value, str):
                     fields["categorical"].append(field)
 
-            # Obtener valores únicos
             unique_values = {}
             for field in fields["categorical"]:
                 values = sorted({record[field] for record in records if field in record})
                 unique_values[field] = values
 
-            return json.dumps({
-                "status": "success",
-                "fields": fields,
-                "unique_values": unique_values
-            }, ensure_ascii=False)
+            return json.dumps({"status": "success", "fields": fields, "unique_values": unique_values}, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error en list_fields: {str(e)}")
-        return json.dumps({
-            "status": "error",
-            "message": str(e)
-        }, ensure_ascii=False)
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
 async def fetch_mes_data(
@@ -138,13 +111,8 @@ async def fetch_mes_data(
     specific_date: Optional[str] = None,
     fields: Optional[List[str]] = None
 ) -> str:
-    """Obtiene datos del MES incluyendo ID de registro"""
     try:
-        time_filter = TimeFilter(
-            start_date=start_date,
-            end_date=end_date,
-            specific_date=specific_date
-        )
+        time_filter = TimeFilter(start_date=start_date, end_date=end_date, specific_date=specific_date)
         time_filter.validate_dates()
 
         params = {}
@@ -163,22 +131,14 @@ async def fetch_mes_data(
             response.raise_for_status()
             data = response.json()
 
-            # Asegurar que el ID siempre esté incluido
             processed_data = []
             for record in data:
-                processed_record = {
-                    "id": record["id"],  # Incluir ID siempre
-                    "date": record["date"],
-                    "machine": record["machine"]
-                }
-                
-                # Agregar campos solicitados o todos los numéricos si no se especifican
+                processed_record = {"id": record["id"], "date": record["date"], "machine": record["machine"]}
                 if fields:
                     for field in fields:
                         if field in record:
                             processed_record[field] = record[field]
                 else:
-                    # Si no se especifican campos, incluir todos los numéricos
                     fields_info = json.loads(await list_fields(ctx))
                     if fields_info["status"] == "success":
                         numeric_fields = fields_info["fields"]["numeric"]
@@ -188,132 +148,85 @@ async def fetch_mes_data(
 
                 processed_data.append(processed_record)
 
-            # Indexar en Qdrant
             points = []
             for record in processed_data:
                 record_text = json.dumps(record)
                 point_id = hashlib.md5(record_text.encode()).hexdigest()
-                points.append(
-                    models.PointStruct(
-                        id=point_id,
-                        vector=model.encode(record_text).tolist(),
-                        payload=record
-                    )
-                )
+                points.append(models.PointStruct(
+                    id=point_id,
+                    vector=model.encode(record_text).tolist(),
+                    payload=record
+                ))
 
             if points:
-                qdrant_client.upsert(
-                    collection_name="mes_logs",
-                    points=points
-                )
+                qdrant_client.upsert(collection_name="mes_logs", points=points)
 
-            return json.dumps({
-                "status": "success",
-                "count": len(processed_data),
-                "data": processed_data
-            }, ensure_ascii=False)
+            return json.dumps({"status": "success", "count": len(processed_data), "data": processed_data}, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error en fetch_mes_data: {str(e)}")
-        return json.dumps({
-            "status": "error",
-            "message": str(e)
-        }, ensure_ascii=False)
-
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
 async def load_sop(ctx: Context, machine: str) -> str:
-    """Carga y procesa un PDF SOP para una máquina específica con mejor extracción de reglas"""
     try:
-        # Verificar si ya existe
         existing = qdrant_client.scroll(
             collection_name="sop_pdfs",
-            scroll_filter=models.Filter(
-                must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]
-            ),
+            scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
             limit=1
         )
 
         if existing[0]:
-            return json.dumps({
-                "status": "exists",
-                "machine": machine,
-                "rules": existing[0][0].payload["rules"]
-            }, ensure_ascii=False)
+            return json.dumps({"status": "exists", "machine": machine, "rules": existing[0][0].payload["rules"]}, ensure_ascii=False)
 
-        # Obtener contenido del PDF
         pdf_name = f"{machine}.pdf"
         async with httpx.AsyncClient() as client:
-            # Verificar existencia
             list_response = await client.get(f"{API_URL}/pdfs/list")
             if not any(pdf["filename"] == pdf_name for pdf in list_response.json()):
-                return json.dumps({
-                    "status": "error",
-                    "message": f"PDF {pdf_name} no encontrado"
-                }, ensure_ascii=False)
+                return json.dumps({"status": "error", "message": f"PDF {pdf_name} no encontrado"}, ensure_ascii=False)
 
-            # Obtener contenido
-            content_response = await client.get(
-                f"{API_URL}/pdfs/content/",
-                params={"filenames": [pdf_name], "max_length": 10000}
-            )
+            content_response = await client.get(f"{API_URL}/pdfs/content/", params={"filenames": [pdf_name], "max_length": 10000})
             content = content_response.json()["pdfs"][0]["content"]
 
-        # Patrones mejorados para extracción exacta de reglas
         rules = {}
         patterns = [
-            (r"(uptime|tiempo de actividad)[^\d]*([>=≥]+)[^\d]*(\d+)\s*%", "uptime", ">="),
-            (r"(defects|defectos|number of defects)[^\d]*([<=≤]+)[^\d]*(\d+)", "defects", "<="),
-            (r"(temperature|temperatura)[^\d]*([<=≤]+)[^\d]*(\d+)\s*°?C?", "temperature", "<="),
-            (r"(throughput|rendimiento|production throughput)[^\d]*([>=≥]+)[^\d]*(\d+)", "throughput", ">=")
+            (r"(temperature|temperatura)\s*(<=|≤)\s*(\d+\.\d+)\s*°C", "temperature", "<="),
+            (r"(vibration|vibración)\s*(<=|≤)\s*(\d+\.\d+)\s*mm/s", "vibration", "<="),
+            (r"(defects|defectos)\s*(<=|≤)\s*(\d+)(?:\s|$|,)", "defects", "<="),
+            (r"(uptime|tiempo de actividad)\s*(>=|≥)\s*(\d+\.\d+)\s*%", "uptime", ">=")
         ]
 
         for pattern, field, operator in patterns:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
+            matches = re.finditer(pattern, content, re.IGNORECASE)
+            for match in matches:
                 try:
                     value = float(match.group(3))
+                    unit = "°C" if field == "temperature" else "mm/s" if field == "vibration" else "%" if field == "uptime" else ""
                     rules[field] = {
                         "value": value,
                         "operator": operator,
-                        "rule_text": f"{field} {operator} {value}" + 
-                                    ("%" if field == "uptime" else "" + 
-                                     ("°C" if field == "temperature" else ""))
+                        "unit": unit,
+                        "rule_text": f"{field} {operator} {value}{unit}"
                     }
                 except ValueError:
                     continue
 
         if not rules:
-            return json.dumps({
-                "status": "error",
-                "message": "No se encontraron reglas en el PDF"
-            }, ensure_ascii=False)
+            return json.dumps({"status": "error", "message": "No se encontraron reglas en el PDF"}, ensure_ascii=False)
 
-        # Almacenar en Qdrant
         embedding = model.encode(content).tolist()
         qdrant_client.upsert(
             collection_name="sop_pdfs",
             points=[models.PointStruct(
                 id=hashlib.md5(machine.encode()).hexdigest(),
                 vector=embedding,
-                payload={
-                    "filename": pdf_name,
-                    "machine": machine,
-                    "rules": rules
-                }
+                payload={"filename": pdf_name, "machine": machine, "rules": rules}
             )]
         )
 
-        return json.dumps({
-            "status": "success",
-            "machine": machine,
-            "rules": rules
-        }, ensure_ascii=False)
+        return json.dumps({"status": "success", "machine": machine, "rules": rules}, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error en load_sop: {str(e)}")
-        return json.dumps({
-            "status": "error",
-            "message": str(e)
-        }, ensure_ascii=False)
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
 async def analyze_compliance(
@@ -323,30 +236,50 @@ async def analyze_compliance(
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None,
     focus_numeric_fields: Optional[List[str]] = None,
-    categorical_filters: Optional[Dict[str, str]] = None
+    categorical_filters: Optional[dict] = None
 ) -> str:
-    """Analiza cumplimiento para cualquier combinación de campos con manejo automático de SOPs"""
     try:
-        time_filter = TimeFilter(
-            start_date=start_date,
-            end_date=end_date,
-            specific_date=specific_date
-        )
+        # 1. Validación de fechas
+        time_filter = TimeFilter(start_date=start_date, end_date=end_date, specific_date=specific_date)
         time_filter.validate_dates()
 
-        # Obtener todos los campos y máquinas disponibles
+        # 2. Normalización de filtros categóricos
+        norm_filters = {}
+        if categorical_filters:
+            for field, value in categorical_filters.items():
+                if isinstance(value, list) and len(value) > 0:
+                    norm_filters[field] = str(value[0])
+                else:
+                    norm_filters[field] = str(value)
+
+        # 3. Validar filtros categóricos
         fields_info = json.loads(await list_fields(ctx))
         if fields_info["status"] != "success":
-            return json.dumps({
-                "status": "error",
-                "message": "No se pudieron obtener los campos disponibles"
-            }, ensure_ascii=False)
+            return json.dumps({"status": "error", "message": "No se pudieron obtener los campos disponibles"})
 
-        # Determinar máquinas a analizar
+        for field, value in norm_filters.items():
+            if field not in fields_info["unique_values"]:
+                return json.dumps({
+                    "status": "invalid_filter",
+                    "message": f"El campo categórico '{field}' no es válido. Campos disponibles: {list(fields_info['unique_values'].keys())}"
+                })
+            if value not in fields_info["unique_values"][field]:
+                return json.dumps({
+                    "status": "invalid_filter",
+                    "message": f"El valor '{value}' no es válido para el campo '{field}'. Valores disponibles: {fields_info['unique_values'][field]}"
+                })
+
+        # 4. Determinar máquinas
         all_machines = fields_info["unique_values"].get("machine", [])
         target_machines = [machine] if machine else all_machines
 
-        # Cargar reglas SOP para todas las máquinas relevantes
+        if machine and machine not in all_machines:
+            return json.dumps({
+                "status": "invalid_filter",
+                "message": f"La máquina '{machine}' no es válida. Máquinas disponibles: {all_machines}"
+            })
+
+        # 5. Cargar reglas SOP
         machines_rules = {}
         for machine_name in target_machines:
             sop_result = json.loads(await load_sop(ctx, machine_name))
@@ -355,11 +288,10 @@ async def analyze_compliance(
             else:
                 machines_rules[machine_name] = {"status": "no_sop"}
 
-        # Determinar campos numéricos a analizar
-        if not focus_numeric_fields:
-            focus_numeric_fields = fields_info["fields"]["numeric"]
+        # 6. Determinar campos numéricos
+        numeric_fields = focus_numeric_fields if focus_numeric_fields else fields_info["fields"]["numeric"]
 
-        # Obtener datos para todas las máquinas objetivo
+        # 7. Obtener y procesar datos
         all_results = []
         for machine_name in target_machines:
             fetch_result = json.loads(await fetch_mes_data(
@@ -368,74 +300,121 @@ async def analyze_compliance(
                 start_date=start_date,
                 end_date=end_date,
                 specific_date=specific_date,
-                fields=list(set(focus_numeric_fields + ["id", "date", "machine"] + (list(categorical_filters.keys()) if categorical_filters else [])))
+                fields=list(set(numeric_fields + ["id", "date", "machine"] + list(norm_filters.keys())))
             ))
 
-            if fetch_result["status"] != "success":
-                continue
+            if fetch_result["status"] != "success" or not fetch_result["data"]:
+                filter_desc = f"máquina '{machine_name}'"
+                if specific_date:
+                    filter_desc += f" en {specific_date}"
+                if norm_filters:
+                    filter_desc += f" con filtros {norm_filters}"
+                return json.dumps({
+                    "status": "no_data",
+                    "message": f"No se encontraron datos para {filter_desc}",
+                    "results": []
+                })
 
-            # Aplicar filtros categóricos
+            # Filtrar registros
             filtered_data = []
             for record in fetch_result["data"]:
                 match = True
-                if categorical_filters:
-                    for field, value in categorical_filters.items():
-                        if record.get(field) != value:
-                            match = False
-                            break
+                for field, value in norm_filters.items():
+                    if str(record.get(field)) != value:
+                        match = False
+                        break
                 if match:
                     filtered_data.append(record)
 
-            # Preparar resultados para esta máquina
+            if not filtered_data:
+                filter_desc = f"máquina '{machine_name}'"
+                if specific_date:
+                    filter_desc += f" en {specific_date}"
+                if norm_filters:
+                    filter_desc += f" con filtros {norm_filters}"
+                return json.dumps({
+                    "status": "no_data",
+                    "message": f"No se encontraron datos para {filter_desc}",
+                    "results": []
+                })
+
+            # Procesar cumplimiento
             for record in filtered_data:
                 entry = {
                     "id": record["id"],
                     "date": record["date"],
                     "machine": record["machine"],
                     "metrics": {},
-                    "compliance_rules": {},
-                    "categorical_data": {},
-                    "sop_status": "available" if machines_rules[machine_name].get("status") != "no_sop" else "not_available"
+                    "compliance_status": {},
+                    "sop_status": "available" if machines_rules[machine_name].get("status") != "no_sop" else "not_available",
+                    "filtered_fields": norm_filters
                 }
 
-                # Campos numéricos y reglas
-                for field in focus_numeric_fields:
+                total_metrics = 0
+                compliant_metrics = 0
+                for field in numeric_fields:
                     if field in record:
-                        entry["metrics"][field] = record[field]
-                        if machines_rules[machine_name].get(field):
-                            entry["compliance_rules"][field] = machines_rules[machine_name][field]["rule_text"]
+                        total_metrics += 1
+                        metric_value = record[field]
+                        entry["metrics"][field] = metric_value
+                        rule = machines_rules[machine_name].get(field)
+                        if rule and "value" in rule:
+                            rule_value = rule["value"]
+                            operator = rule["operator"]
+                            unit = rule["unit"]
+                            is_compliant = (
+                                metric_value <= rule_value if operator == "<=" else
+                                metric_value >= rule_value
+                            )
+                            entry["compliance_status"][field] = {
+                                "value": metric_value,
+                                "rule": f"{operator} {rule_value}{unit}",
+                                "status": "compliant" if is_compliant else "non_compliant"
+                            }
+                            if is_compliant:
+                                compliant_metrics += 1
                         else:
-                            entry["compliance_rules"][field] = "no_rule_defined"
+                            entry["compliance_status"][field] = {
+                                "value": metric_value,
+                                "rule": "no_rule_defined",
+                                "status": "unknown"
+                            }
 
-                # Campos categóricos
-                if categorical_filters:
-                    for field in categorical_filters.keys():
-                        if field in record:
-                            entry["categorical_data"][field] = record[field]
+                compliance_percentage = (compliant_metrics / total_metrics * 100) if total_metrics > 0 else 0
+                entry["compliance_percentage"] = round(compliance_percentage, 2)
 
                 all_results.append(entry)
+
+        # 8. Resumen de SOPs
+        sop_summary = {
+            "machines_with_sop": sum(1 for rules in machines_rules.values() if rules.get("status") != "no_sop"),
+            "machines_without_sop": sum(1 for rules in machines_rules.values() if rules.get("status") == "no_sop")
+        }
 
         return json.dumps({
             "status": "success",
             "period": specific_date or f"{start_date} a {end_date}",
             "machine_filter": machine or "all_machines",
-            "numeric_fields_analyzed": focus_numeric_fields,
-            "categorical_filters": categorical_filters or {},
-            "sop_summary": {
-                "machines_with_sop": sum(1 for rules in machines_rules.values() if rules.get("status") != "no_sop"),
-                "machines_without_sop": sum(1 for rules in machines_rules.values() if rules.get("status") == "no_sop")
-            },
-            "analysis_note": "Verifique 'sop_status' en cada registro. Campos sin reglas mostrarán 'no_rule_defined'",
-            "results": all_results
+            "numeric_fields_analyzed": numeric_fields,
+            "categorical_filters_applied": norm_filters,
+            "sop_summary": sop_summary,
+            "results": all_results,
+            "analysis_note": "Cada métrica incluye valor actual, regla SOP, y estado de cumplimiento (compliant/non_compliant/unknown)"
         }, ensure_ascii=False)
+
     except Exception as e:
-        logger.error(f"Error en analyze_compliance: {str(e)}")
+        logger.error(f"Error en analyze_compliance: {str(e)}", exc_info=True)
         return json.dumps({
             "status": "error",
-            "message": str(e)
+            "message": f"Error al analizar cumplimiento: {str(e)}",
+            "parameters_received": {
+                "machine": machine,
+                "date_range": f"{start_date} to {end_date}",
+                "numeric_fields": focus_numeric_fields,
+                "categorical_filters": categorical_filters
+            }
         }, ensure_ascii=False)
 
 if __name__ == "__main__":
-    # Inicializar Qdrant al iniciar
     init_collections()
     mcp.run()

@@ -56,19 +56,19 @@ def init_db():
     # Insertar nuevos registros fijos si la tabla está vacía
     if count == 0:
         fixed_records = [
-            ("2025-04-10", "ModelA", "Line1", "Steel", "BATCH101", 95.0, 2, 0.7, 75.0, "scratch", 90.0, 400),
+            ("2025-04-10", "ModelA", "Line3", "Steel", "BATCH101", 95.0, 2, 0.7, 75.0, "scratch", 90.0, 400),
             ("2025-04-10", "ModelB", "Line2", "Aluminum", "BATCH102", 97.5, 1, 0.6, 70.0, "dent", 88.0, 350),
             ("2025-04-11", "ModelC", "Line1", "Copper", "BATCH137", 87.0, 3, 0.8, 81.0, "crack", 85.0, 350),
             ("2025-04-10", "ModelD", "Line3", "Plastic", "BATCH104", 97.5, 4, 0.9, 78.0, "warp", 87.0, 300),
             ("2025-04-10", "ModelE", "Line2", "Brass", "BATCH105", 90.0, 2, 0.65, 72.0, "chip", 89.0, 320),
             ("2025-04-10", "ModelF", "Line1", "Titanium", "BATCH106", 95.0, 2, 0.75, 76.0, "scratch", 91.0, 380),
-            ("2025-04-09", "ModelA", "Line1", "Steel", "BATCH107", 97.5, 1, 0.6, 74.0, "dent", 92.0, 410),
+            ("2025-04-09", "ModelA", "Line1", "Aluminum", "BATCH107", 97.5, 1, 0.6, 74.0, "dent", 92.0, 410),
             ("2025-04-09", "ModelB", "Line2", "Aluminum", "BATCH108", 92.0, 3, 0.8, 79.0, "crack", 86.0, 340),
             ("2025-04-09", "ModelC", "Line1", "Copper", "BATCH109", 88.5, 4, 0.85, 82.0, "warp", 84.0, 360),
             ("2025-04-09", "ModelD", "Line3", "Plastic", "BATCH110", 90.0, 2, 0.7, 77.0, "chip", 88.0, 310),
             ("2025-04-09", "ModelE", "Line2", "Brass", "BATCH111", 99.0, 0, 0.5, 70.0, "none", 93.0, 330),
             ("2025-04-09", "ModelF", "Line1", "Titanium", "BATCH112", 85.5, 5, 0.9, 80.0, "scratch", 83.0, 370),
-            ("2025-04-11", "ModelA", "Line1", "Steel", "BATCH113", 93.0, 1, 0.65, 73.0, "dent", 90.0, 390),
+            ("2025-04-11", "ModelA", "Line1", "Steel", "BATCH113", 93.0, 1, 0.4, 73.0, "dent", 90.0, 390),
             ("2025-04-11", "ModelB", "Line2", "Aluminum", "BATCH114", 96.5, 2, 0.7, 71.0, "crack", 89.0, 360),
             ("2025-04-11", "ModelD", "Line3", "Plastic", "BATCH115", 89.0, 3, 0.8, 79.0, "warp", 86.0, 320),
         ]
