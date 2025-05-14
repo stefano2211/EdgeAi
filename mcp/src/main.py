@@ -11,28 +11,30 @@ from qdrant_client.http import models
 import json
 import hashlib
 
-# Inicializar FastMCP para procesar herramientas de cumplimiento MES
-mcp = FastMCP("MES Compliance Processor")
+# Inicialización del servicio MCP
+mcp = FastMCP("Manufacturing Compliance Processor")
 
-# Configuración de la URL de la API MES y el modelo de embeddings
-API_URL = "http://api:5000"
-model = SentenceTransformer('all-MiniLM-L6-v2')
+# Configuración global
+API_URL = "http://api:5000"  # URL de la API de manufactura
+model = SentenceTransformer('all-MiniLM-L6-v2')  # Modelo de embeddings
+qdrant_client = QdrantClient(host="qdrant", port=6333)  # Cliente de Qdrant
 
-# Inicializar cliente Qdrant para almacenamiento de vectores
-qdrant_client = QdrantClient(host="qdrant", port=6333)
-
-# Configurar logging para depuración y monitoreo
+# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class TimeFilter(BaseModel):
     """
-    Modelo para validar filtros de tiempo (fechas) usados en fetch_mes_data y analyze_compliance.
+    Modelo para validación de filtros temporales en consultas MES.
     
     Atributos:
-        start_date (Optional[str]): Fecha de inicio en formato YYYY-MM-DD (opcional).
-        end_date (Optional[str]): Fecha de fin en formato YYYY-MM-DD (opcional).
-        specific_date (Optional[str]): Fecha específica en formato YYYY-MM-DD (opcional).
+        start_date (str, opcional): Fecha de inicio en formato YYYY-MM-DD.
+        end_date (str, opcional): Fecha de fin en formato YYYY-MM-DD.
+        specific_date (str, opcional): Fecha específica en formato YYYY-MM-DD.
+    
+    Notas:
+        - specific_date tiene prioridad sobre start_date/end_date
+        - Valida el formato de fecha y coherencia temporal
     """
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -40,109 +42,111 @@ class TimeFilter(BaseModel):
 
     def validate_dates(self):
         """
-        Valida que las fechas proporcionadas sean válidas y estén en formato correcto.
+        Valida el formato y coherencia de las fechas proporcionadas.
         
         Raises:
-            ValueError: Si las fechas no están en formato YYYY-MM-DD o si start_date > end_date.
+            ValueError: Si las fechas tienen formato incorrecto o son incoherentes.
         """
+        date_formats = []
         try:
             if self.specific_date:
                 datetime.strptime(self.specific_date, "%Y-%m-%d")
+                date_formats.append(f"Fecha específica: {self.specific_date}")
             else:
                 if self.start_date:
                     datetime.strptime(self.start_date, "%Y-%m-%d")
+                    date_formats.append(f"Desde: {self.start_date}")
                 if self.end_date:
                     datetime.strptime(self.end_date, "%Y-%m-%d")
+                    date_formats.append(f"Hasta: {self.end_date}")
                 if self.start_date and self.end_date and self.start_date > self.end_date:
-                    raise ValueError("Start date cannot be after end date")
+                    raise ValueError("La fecha de inicio no puede ser mayor que la de fin")
         except ValueError as e:
-            raise ValueError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}")
+            error_msg = f"Formato de fecha inválido. Use YYYY-MM-DD. Detalles: {', '.join(date_formats)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg) from e
 
 def init_collections():
     """
-    Inicializa las colecciones de Qdrant para almacenar logs MES y reglas SOP.
+    Inicializa las colecciones en Qdrant para almacenamiento de datos.
     
-    - Crea/recrea las colecciones 'mes_logs' y 'sop_pdfs' con configuración de vectores.
-    - Usa distancia COSINE y optimizaciones para indexing y almacenamiento en memoria.
+    Crea dos colecciones:
+    1. 'mes_logs': Para registros de manufactura con embeddings
+    2. 'sop_pdfs': Para documentos SOP con sus reglas extraídas
+    
+    Configura:
+    - Vectores de 384 dimensiones usando el modelo SentenceTransformer
+    - Distancia coseno para similitud
+    - Optimizaciones para manejo de grandes volúmenes
     
     Raises:
-        Exception: Si falla la inicialización de las colecciones en Qdrant.
+        RuntimeError: Si falla la creación de las colecciones
     """
     try:
+        # Configuración común para ambas colecciones
+        vector_config = models.VectorParams(
+            size=384,
+            distance=models.Distance.COSINE
+        )
+        optimizer_config = models.OptimizersConfigDiff(
+            indexing_threshold=20000,
+            memmap_threshold=20000
+        )
+        
+        # Colección para registros MES
         qdrant_client.recreate_collection(
             collection_name="mes_logs",
-            vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
-            optimizers_config=models.OptimizersConfigDiff(indexing_threshold=20000, memmap_threshold=20000)
+            vectors_config=vector_config,
+            optimizers_config=optimizer_config
         )
+        
+        # Colección para documentos SOP
         qdrant_client.recreate_collection(
             collection_name="sop_pdfs",
-            vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
-            optimizers_config=models.OptimizersConfigDiff(indexing_threshold=0, memmap_threshold=20000)
+            vectors_config=vector_config,
+            optimizers_config=models.OptimizersConfigDiff(
+                indexing_threshold=0,  # Indexar todo inmediatamente
+                memmap_threshold=20000
+            )
         )
-        logger.info("Colecciones de Qdrant inicializadas")
+        logger.info("Colecciones Qdrant inicializadas: mes_logs, sop_pdfs")
     except Exception as e:
-        logger.error(f"Error inicializando Qdrant: {str(e)}")
-        raise
-
-@mcp.tool()
-async def list_available_tools(ctx: Context) -> str:
-    """
-    Lista todas las herramientas MCP disponibles para el análisis de cumplimiento MES.
-    
-    Parámetros:
-        ctx (Context): Contexto de FastMCP para manejar la solicitud (requerido por mcpo).
-    
-    Retorna:
-        str: JSON con:
-            - status: "success" o "error".
-            - tools: Lista de nombres de herramientas disponibles (si success).
-            - message: Mensaje de error (si error).
-    
-    Uso por mcpo:
-        - Mapea a prompts como "Lista las herramientas disponibles".
-        - Útil para depuración o para verificar qué funciones están registradas.
-    
-    Ejemplo:
-        ```json
-        {"status": "success", "tools": ["list_available_tools", "list_fields", "fetch_mes_data", "load_sop", "analyze_compliance"]}
-        ```
-    """
-    try:
-        tools = [t.__name__ for t in mcp.tools]
-        return json.dumps({"status": "success", "tools": tools}, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Error en list_available_tools: {str(e)}")
-        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+        logger.error("Error inicializando Qdrant: %s", str(e))
+        raise RuntimeError("No se pudieron inicializar las colecciones") from e
 
 @mcp.tool()
 async def list_fields(ctx: Context) -> str:
     """
-    Obtiene los campos disponibles (numéricos y categóricos) y sus valores únicos desde los datos MES.
+    Obtiene la estructura de campos disponibles en los datos MES.
     
-    Parámetros:
-        ctx (Context): Contexto de FastMCP para manejar la solicitud (requerido por mcpo).
+    Procesa:
+    1. Consulta todos los registros MES disponibles
+    2. Clasifica campos en numéricos (key_figures) y categóricos (key_values)
+    3. Identifica valores únicos para campos categóricos
     
-    Retorna:
-        str: JSON con:
-            - status: "success", "no_data" o "error".
-            - fields: Diccionario con:
-                - numeric: Lista de campos numéricos (e.g., ["uptime", "temperature"]).
-                - categorical: Lista de campos categóricos (e.g., ["machine", "production_line"]).
-            - unique_values: Diccionario con valores únicos por campo categórico (e.g., {"machine": ["ModelA", "ModelB"], "production_line": ["Line1", "Line3"]}).
-            - message: Mensaje si no hay datos o error.
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"error"|"no_data",
+                "key_figures": ["uptime", "temperature", ...],
+                "key_values": {
+                    "machine": ["ModelA", "ModelB", ...],
+                    "production_line": ["Line1", "Line2", ...],
+                    ...
+                },
+                "message": str  # Solo en casos de error
+            }
     
-    Uso por mcpo:
-        - Mapea a prompts como "Lista las métricas disponibles" o "Muestra los valores categóricos".
-        - Proporciona datos para poblar dropdowns/autocomplete en Open WebUI (e.g., máquinas, líneas de producción).
-    
-    Ejemplo:
-        ```json
+    Example:
+        >>> list_fields()
         {
             "status": "success",
-            "fields": {"numeric": ["temperature", "defects"], "categorical": ["machine", "production_line"]},
-            "unique_values": {"machine": ["ModelA", "ModelB"], "production_line": ["Line1", "Line3"]}
+            "key_figures": ["uptime", "temperature", "defects"],
+            "key_values": {
+                "machine": ["ModelA", "ModelB"],
+                "production_line": ["Line1", "Line2"]
+            }
         }
-        ```
     """
     try:
         async with httpx.AsyncClient() as client:
@@ -150,469 +154,551 @@ async def list_fields(ctx: Context) -> str:
             response.raise_for_status()
             records = response.json()
 
-            if not records:
-                return json.dumps({"status": "no_data", "message": "No se encontraron registros", "fields": []})
+        if not records:
+            return json.dumps({
+                "status": "no_data",
+                "message": "No hay registros disponibles en el MES",
+                "key_figures": [],
+                "key_values": {}
+            })
 
-            sample = records[0]
-            fields = {"numeric": [], "categorical": []}
-            for field, value in sample.items():
-                if field == "id":
-                    continue
-                if isinstance(value, (int, float)):
-                    fields["numeric"].append(field)
-                elif isinstance(value, str):
-                    fields["categorical"].append(field)
+        # Clasificación de campos
+        sample_record = records[0]
+        key_figures = []
+        key_values = {}
+        
+        for field, value in sample_record.items():
+            if field == "id":
+                continue
+                
+            if isinstance(value, (int, float)):
+                key_figures.append(field)
+            elif isinstance(value, str):
+                unique_values = sorted({rec[field] for rec in records if field in rec})
+                key_values[field] = unique_values
 
-            unique_values = {}
-            for field in fields["categorical"]:
-                values = sorted({record[field] for record in records if field in record})
-                unique_values[field] = values
+        return json.dumps({
+            "status": "success",
+            "key_figures": sorted(key_figures),
+            "key_values": key_values
+        }, ensure_ascii=False)
 
-            return json.dumps({"status": "success", "fields": fields, "unique_values": unique_values}, ensure_ascii=False)
     except Exception as e:
-        logger.error(f"Error en list_fields: {str(e)}")
-        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+        logger.error("Error en list_fields: %s", str(e))
+        return json.dumps({
+            "status": "error",
+            "message": f"Error al listar campos: {str(e)}",
+            "key_figures": [],
+            "key_values": {}
+        }, ensure_ascii=False)
 
 @mcp.tool()
 async def fetch_mes_data(
     ctx: Context,
-    machine: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    specific_date: Optional[str] = None,
-    fields: Optional[List[str]] = None
+    key_values: Optional[Dict[str, str]] = None,
+    key_figures: Optional[List[str]] = None,
+    time_filter: Optional[Dict[str, str]] = None
 ) -> str:
     """
-    Recupera datos MES filtrados por máquina, fechas y campos específicos, y los almacena en Qdrant.
+    Recupera datos del MES con filtros avanzados.
     
-    Parámetros:
-        ctx (Context): Contexto de FastMCP para manejar la solicitud (requerido por mcpo).
-        machine (Optional[str]): Nombre de la máquina a filtrar (e.g., "ModelA"). Si None, incluye todas las máquinas.
-        start_date (Optional[str]): Fecha de inicio en formato YYYY-MM-DD (para rango de fechas).
-        end_date (Optional[str]): Fecha de fin en formato YYYY-MM-DD (para rango de fechas).
-        specific_date (Optional[str]): Fecha específica en formato YYYY-MM-DD (prioriza sobre start_date/end_date).
-        fields (Optional[List[str]]): Lista de campos a recuperar (e.g., ["temperature", "defects"]). Si None, incluye todos los campos numéricos.
+    Args:
+        key_values: Filtros categóricos ej. {"machine": "ModelA", "production_line": "Line1"}
+        key_figures: Campos numéricos a incluir ej. ["uptime", "temperature"]
+        time_filter: {"start_date": "2025-01-01", "end_date": "2025-01-31"} o {"specific_date": "2025-01-15"}
     
-    Retorna:
-        str: JSON con:
-            - status: "success" o "error".
-            - count: Número de registros recuperados.
-            - data: Lista de registros MES con campos solicitados (e.g., [{"id": "1", "date": "2025-04-09", "machine": "ModelA", "temperature": 74.0}]).
-            - message: Mensaje de error (si error).
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"error",
+                "count": int,
+                "data": [
+                    {
+                        "id": str,
+                        "date": str,
+                        "machine": str,
+                        ...key_figures
+                    },
+                    ...
+                ],
+                "message": str  # Solo en error
+            }
     
-    Uso por mcpo:
-        - Mapea a prompts como "Obtén datos MES para ModelA el 2025-04-09" o "Recupera temperatura y defectos desde 2025-04-09 hasta 2025-04-11".
-        - Usado internamente por analyze_compliance para obtener datos antes del análisis.
-    
-    Ejemplo:
-        ```json
+    Example:
+        >>> fetch_mes_data(
+                key_values={"machine": "ModelA"},
+                key_figures=["uptime", "temperature"],
+                time_filter={"start_date": "2025-01-01", "end_date": "2025-01-31"}
+            )
         {
             "status": "success",
-            "count": 2,
+            "count": 10,
             "data": [
-                {"id": "1", "date": "2025-04-09", "machine": "ModelA", "temperature": 74.0},
-                {"id": "2", "date": "2025-04-11", "machine": "ModelA", "temperature": 73.0}
+                {"id": "1", "date": "2025-01-01", "machine": "ModelA", "uptime": 95.0, "temperature": 72.0},
+                ...
             ]
         }
-        ```
     """
     try:
-        time_filter = TimeFilter(start_date=start_date, end_date=end_date, specific_date=specific_date)
-        time_filter.validate_dates()
+        # Validación de parámetros
+        key_values = key_values or {}
+        key_figures = key_figures or []
+        
+        # Procesamiento del filtro temporal
+        query_params = {}
+        if time_filter:
+            tf = TimeFilter(**time_filter)
+            tf.validate_dates()
+            
+            if tf.specific_date:
+                query_params["specific_date"] = tf.specific_date
+            else:
+                if tf.start_date:
+                    query_params["start_date"] = tf.start_date
+                if tf.end_date:
+                    query_params["end_date"] = tf.end_date
 
-        params = {}
-        if time_filter.specific_date:
-            params["specific_date"] = time_filter.specific_date
-        else:
-            if time_filter.start_date:
-                params["start_date"] = time_filter.start_date
-            if time_filter.end_date:
-                params["end_date"] = time_filter.end_date
+        # Construcción del endpoint
+        endpoint = f"{API_URL}/machines/"
+        if "machine" in key_values:
+            endpoint = f"{API_URL}/machines/{key_values['machine']}"
 
-        endpoint = f"{API_URL}/machines/{machine}" if machine else f"{API_URL}/machines/"
-
+        # Consulta a la API
         async with httpx.AsyncClient() as client:
-            response = await client.get(endpoint, params=params)
+            response = await client.get(endpoint, params=query_params)
             response.raise_for_status()
             data = response.json()
 
-            processed_data = []
-            for record in data:
-                processed_record = {"id": record["id"], "date": record["date"], "machine": record["machine"]}
-                if fields:
-                    for field in fields:
-                        if field in record:
-                            processed_record[field] = record[field]
-                else:
-                    fields_info = json.loads(await list_fields(ctx))
-                    if fields_info["status"] == "success":
-                        numeric_fields = fields_info["fields"]["numeric"]
-                        for field in numeric_fields:
-                            if field in record:
-                                processed_record[field] = record[field]
+        # Filtrado adicional por key_values
+        filtered_data = [
+            record for record in data
+            if all(record.get(k) == v for k, v in key_values.items() if k != "machine")
+        ]
 
-                processed_data.append(processed_record)
+        # Selección de campos
+        processed_data = []
+        for record in filtered_data:
+            item = {
+                "id": record["id"],
+                "date": record["date"],
+                "machine": record["machine"]
+            }
+            
+            # Agregar key_figures solicitados
+            for field in key_figures:
+                if field in record:
+                    item[field] = record[field]
+            
+            processed_data.append(item)
 
+        # Almacenamiento en Qdrant
+        if processed_data:
             points = []
             for record in processed_data:
                 record_text = json.dumps(record)
                 point_id = hashlib.md5(record_text.encode()).hexdigest()
+                
                 points.append(models.PointStruct(
                     id=point_id,
                     vector=model.encode(record_text).tolist(),
                     payload=record
                 ))
+            
+            qdrant_client.upsert(
+                collection_name="mes_logs",
+                points=points
+            )
 
-            if points:
-                qdrant_client.upsert(collection_name="mes_logs", points=points)
+        return json.dumps({
+            "status": "success",
+            "count": len(processed_data),
+            "data": processed_data
+        }, ensure_ascii=False)
 
-            return json.dumps({"status": "success", "count": len(processed_data), "data": processed_data}, ensure_ascii=False)
     except Exception as e:
-        logger.error(f"Error en fetch_mes_data: {str(e)}")
-        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+        logger.error("Error en fetch_mes_data: %s", str(e))
+        return json.dumps({
+            "status": "error",
+            "message": f"Error al recuperar datos: {str(e)}",
+            "count": 0,
+            "data": []
+        }, ensure_ascii=False)
 
 @mcp.tool()
 async def load_sop(ctx: Context, machine: str) -> str:
     """
-    Carga y parsea las reglas SOP (Standard Operating Procedure) desde un PDF asociado a una máquina, almacenándolas en Qdrant.
+    Carga y procesa un documento SOP para una máquina específica.
     
-    Parámetros:
-        ctx (Context): Contexto de FastMCP para manejar la solicitud (requerido por mcpo).
-        machine (str): Nombre de la máquina para la cual cargar el SOP (e.g., "ModelA"). Busca el PDF `{machine}.pdf`.
+    Args:
+        machine: Nombre de la máquina (ej. "ModelA")
     
-    Retorna:
-        str: JSON con:
-            - status: "success", "exists" (si ya está en Qdrant), o "error".
-            - machine: Nombre de la máquina.
-            - rules: Diccionario de reglas parseadas (e.g., {"temperature": {"value": 75.0, "operator": "<=", "unit": "°C", "rule_text": "temperature <= 75.0°C"}}).
-            - message: Mensaje de error (si error).
+    Process:
+        1. Verifica si ya existe en Qdrant
+        2. Descarga el PDF correspondiente (machine.pdf)
+        3. Extrae reglas usando expresiones regulares
+        4. Almacena en Qdrant con embeddings
     
-    Uso por mcpo:
-        - Mapea a prompts como "Muestra las reglas SOP para ModelA".
-        - Usado internamente por analyze_compliance para obtener reglas antes del análisis de cumplimiento.
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"exists"|"error",
+                "machine": str,
+                "rules": {
+                    "uptime": {"value": 95.0, "operator": ">=", "unit": "%"},
+                    ...
+                },
+                "message": str  # Solo en error
+            }
     
-    Ejemplo:
-        ```json
+    Example:
+        >>> load_sop("ModelA")
         {
             "status": "success",
             "machine": "ModelA",
             "rules": {
-                "temperature": {"value": 75.0, "operator": "<=", "unit": "°C", "rule_text": "temperature <= 75.0°C"},
-                "defects": {"value": 2, "operator": "<=", "unit": "", "rule_text": "defects <= 2"}
+                "uptime": {"value": 95.0, "operator": ">=", "unit": "%", "source_text": "uptime >= 95%"},
+                "temperature": {"value": 75.0, "operator": "<=", "unit": "°C", "source_text": "temperature <= 75°C"}
             }
         }
-        ```
     """
     try:
+        # Verificar existencia previa
         existing = qdrant_client.scroll(
             collection_name="sop_pdfs",
-            scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]
+            ),
             limit=1
         )
-
+        
         if existing[0]:
-            return json.dumps({"status": "exists", "machine": machine, "rules": existing[0][0].payload["rules"]}, ensure_ascii=False)
+            return json.dumps({
+                "status": "exists",
+                "machine": machine,
+                "rules": existing[0][0].payload["rules"]
+            }, ensure_ascii=False)
 
+        # Descargar contenido del PDF
         pdf_name = f"{machine}.pdf"
         async with httpx.AsyncClient() as client:
+            # Verificar disponibilidad
             list_response = await client.get(f"{API_URL}/pdfs/list")
-            if not any(pdf["filename"] == pdf_name for pdf in list_response.json()):
-                return json.dumps({"status": "error", "message": f"PDF {pdf_name} no encontrado"}, ensure_ascii=False)
-
-            content_response = await client.get(f"{API_URL}/pdfs/content/", params={"filenames": [pdf_name], "max_length": 10000})
+            available_pdfs = [pdf["filename"] for pdf in list_response.json()]
+            
+            if pdf_name not in available_pdfs:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"PDF {pdf_name} no encontrado. Disponibles: {', '.join(available_pdfs)}"
+                }, ensure_ascii=False)
+            
+            # Obtener contenido
+            content_response = await client.get(
+                f"{API_URL}/pdfs/content/",
+                params={"filenames": [pdf_name], "max_length": 10000}
+            )
             content = content_response.json()["pdfs"][0]["content"]
 
-        rules = {}
-        patterns = [
-            (r"(temperature|temperatura)\s*(<=|≤)\s*(\d+\.\d+)\s*°C", "temperature", "<="),
-            (r"(vibration|vibración)\s*(<=|≤)\s*(\d+\.\d+)\s*mm/s", "vibration", "<="),
-            (r"(defects|defectos)\s*(<=|≤)\s*(\d+)(?:\s|$|,)", "defects", "<="),
-            (r"(uptime|tiempo de actividad)\s*(>=|≥)\s*(\d+\.\d+)\s*%", "uptime", ">=")
+        # Extracción de reglas con patrones robustos
+        rule_patterns = [
+            (r"(?P<field>uptime|tiempo de actividad)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*%", "uptime", ">=", "%"),
+            (r"(?P<field>temperature|temperatura)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*°C", "temperature", "<=", "°C"),
+            (r"(?P<field>vibration|vibración)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*mm/s", "vibration", "<=", "mm/s"),
+            (r"(?P<field>defects|defectos)\s*(?P<operator><=|≤)\s*(?P<value>\d+)", "defects", "<=", "")
         ]
-
-        for pattern, field, operator in patterns:
+        
+        rules = {}
+        for pattern, field, default_op, unit in rule_patterns:
             matches = re.finditer(pattern, content, re.IGNORECASE)
             for match in matches:
                 try:
-                    value = float(match.group(3))
-                    unit = "°C" if field == "temperature" else "mm/s" if field == "vibration" else "%" if field == "uptime" else ""
                     rules[field] = {
-                        "value": value,
-                        "operator": operator,
+                        "value": float(match.group("value")),
+                        "operator": match.group("operator") if match.group("operator") else default_op,
                         "unit": unit,
-                        "rule_text": f"{field} {operator} {value}{unit}"
+                        "source_text": match.group(0)
                     }
-                except ValueError:
+                except (ValueError, KeyError) as e:
+                    logger.warning("Error extrayendo regla %s: %s", field, str(e))
                     continue
 
         if not rules:
-            return json.dumps({"status": "error", "message": "No se encontraron reglas en el PDF"}, ensure_ascii=False)
+            return json.dumps({
+                "status": "error",
+                "message": f"No se encontraron reglas en {pdf_name}",
+                "machine": machine,
+                "rules": {}
+            }, ensure_ascii=False)
 
+        # Almacenamiento en Qdrant
         embedding = model.encode(content).tolist()
         qdrant_client.upsert(
             collection_name="sop_pdfs",
             points=[models.PointStruct(
                 id=hashlib.md5(machine.encode()).hexdigest(),
                 vector=embedding,
-                payload={"filename": pdf_name, "machine": machine, "rules": rules}
+                payload={
+                    "machine": machine,
+                    "filename": pdf_name,
+                    "rules": rules
+                }
             )]
         )
 
-        return json.dumps({"status": "success", "machine": machine, "rules": rules}, ensure_ascii=False)
+        return json.dumps({
+            "status": "success",
+            "machine": machine,
+            "rules": rules
+        }, ensure_ascii=False)
+
     except Exception as e:
-        logger.error(f"Error en load_sop: {str(e)}")
-        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+        logger.error("Error en load_sop para %s: %s", machine, str(e))
+        return json.dumps({
+            "status": "error",
+            "message": f"Error al procesar SOP: {str(e)}",
+            "machine": machine,
+            "rules": {}
+        }, ensure_ascii=False)
 
 @mcp.tool()
 async def analyze_compliance(
     ctx: Context,
-    machine: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    specific_date: Optional[str] = None,
-    focus_numeric_fields: Optional[List[str]] = None,
-    categorical_filters: Optional[dict] = None
+    key_values: Optional[Dict[str, str]] = None,
+    key_figures: Optional[List[str]] = None,
+    time_filter: Optional[Dict[str, str]] = None
 ) -> str:
     """
-    Analiza el cumplimiento de datos MES contra reglas SOP para una o varias máquinas, con filtros de tiempo y categóricos.
+    Analiza el cumplimiento de métricas MES contra reglas SOP.
     
-    Parámetros:
-        ctx (Context): Contexto de FastMCP para manejar la solicitud (requerido por mcpo).
-        machine (Optional[str]): Nombre de la máquina a analizar (e.g., "ModelA"). Si None, analiza todas las máquinas.
-        start_date (Optional[str]): Fecha de inicio en formato YYYY-MM-DD (para rango de fechas).
-        end_date (Optional[str]): Fecha de fin en formato YYYY-MM-DD (para rango de fechas).
-        specific_date (Optional[str]): Fecha específica en formato YYYY-MM-DD (prioriza sobre start_date/end_date).
-        focus_numeric_fields (Optional[List[str]]): Lista de campos numéricos a analizar (e.g., ["temperature", "defects"]). Si None, incluye todos los campos numéricos.
-        categorical_filters (Optional[dict]): Diccionario de filtros categóricos (e.g., {"production_line": "Line1", "material": "Steel"}). Si None, no aplica filtros categóricos.
+    Args:
+        key_values: Filtros categóricos ej. {"machine": "ModelA"}
+        key_figures: Métricas a analizar ej. ["uptime", "temperature"]
+        time_filter: Rango de fechas ej. {"start_date": "2025-01-01", "end_date": "2025-01-31"}
     
-    Retorna:
-        str: JSON con:
-            - status: "success", "error", "no_data", o "invalid_filter".
-            - period: Período analizado (fecha específica o rango).
-            - machine_filter: Máquina analizada o "all_machines".
-            - numeric_fields_analyzed: Campos numéricos analizados.
-            - categorical_filters_applied: Filtros categóricos aplicados.
-            - sop_summary: Resumen de máquinas con/sin SOP.
-            - results: Lista de registros con:
-                - id: ID del registro MES.
-                - date: Fecha del registro.
-                - machine: Nombre de la máquina.
-                - metrics: Diccionario de valores de métricas.
-                - compliance_status: Estado de cumplimiento por métrica (compliant/non_compliant/unknown).
-                - sop_status: "available" o "not_available".
-                - filtered_fields: Filtros categóricos aplicados.
-                - compliance_percentage: Porcentaje de cumplimiento (0-100).
-            - analysis_note: Nota sobre el análisis.
-            - message: Mensaje de error o descripción (si no es success).
+    Process:
+        1. Valida parámetros de entrada
+        2. Obtiene datos MES con los filtros
+        3. Carga reglas SOP para las máquinas involucradas
+        4. Evalúa cumplimiento métrica por métrica
     
-    Uso por mcpo:
-        - Mapea a prompts como "Analiza el cumplimiento para ModelA el 2025-04-09 con filtro production_line=Line1" o "Analiza temperatura desde 2025-04-09 hasta 2025-04-11".
-        - Principal función para generar reportes de cumplimiento, usando fetch_mes_data y load_sop internamente.
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"error",
+                "period": str,
+                "machine_filter": str,
+                "metrics_analyzed": [str],
+                "results": [
+                    {
+                        "id": str,
+                        "date": str,
+                        "machine": str,
+                        "metrics": {"uptime": 95.0, ...},
+                        "compliance": {
+                            "uptime": {
+                                "value": 95.0,
+                                "rule": ">= 95%",
+                                "status": "compliant"
+                            },
+                            ...
+                        },
+                        "compliance_percentage": float
+                    },
+                    ...
+                ],
+                "sop_coverage": str,
+                "message": str  # Solo en error
+            }
     
-    Ejemplo:
-        ```json
+    Example:
+        >>> analyze_compliance(
+                key_values={"machine": "ModelA"},
+                key_figures=["uptime"],
+                time_filter={"specific_date": "2025-01-01"}
+            )
         {
             "status": "success",
-            "period": "2025-04-09 a 2025-04-11",
+            "period": "2025-01-01",
             "machine_filter": "ModelA",
-            "numeric_fields_analyzed": ["temperature"],
-            "categorical_filters_applied": {"production_line": "Line1"},
-            "sop_summary": {"machines_with_sop": 1, "machines_without_sop": 0},
+            "metrics_analyzed": ["uptime"],
             "results": [
                 {
-                    "id": "1",
-                    "date": "2025-04-09",
+                    "id": "123",
+                    "date": "2025-01-01",
                     "machine": "ModelA",
-                    "metrics": {"temperature": 74.0},
-                    "compliance_status": {
-                        "temperature": {"value": 74.0, "rule": "<= 75.0°C", "status": "compliant"}
+                    "metrics": {"uptime": 96.0},
+                    "compliance": {
+                        "uptime": {
+                            "value": 96.0,
+                            "rule": ">= 95%",
+                            "status": "compliant"
+                        }
                     },
-                    "sop_status": "available",
-                    "filtered_fields": {"production_line": "Line1"},
                     "compliance_percentage": 100.0
                 }
             ],
-            "analysis_note": "Cada métrica incluye valor actual, regla SOP, y estado de cumplimiento"
+            "sop_coverage": "1/1 máquinas con SOP"
         }
-        ```
     """
     try:
-        # 1. Validación de fechas
-        time_filter = TimeFilter(start_date=start_date, end_date=end_date, specific_date=specific_date)
-        time_filter.validate_dates()
-
-        # 2. Normalización de filtros categóricos
-        norm_filters = {}
-        if categorical_filters:
-            for field, value in categorical_filters.items():
-                if isinstance(value, list) and len(value) > 0:
-                    norm_filters[field] = str(value[0])
-                else:
-                    norm_filters[field] = str(value)
-
-        # 3. Validar filtros categóricos
+        # Validación inicial
+        key_values = key_values or {}
+        key_figures = key_figures or []
+        time_filter = time_filter or {}
+        
+        # Obtener estructura de campos válidos
         fields_info = json.loads(await list_fields(ctx))
         if fields_info["status"] != "success":
-            return json.dumps({"status": "error", "message": "No se pudieron obtener los campos disponibles"})
-
-        for field, value in norm_filters.items():
-            if field not in fields_info["unique_values"]:
-                return json.dumps({
-                    "status": "invalid_filter",
-                    "message": f"El campo categórico '{field}' no es válido. Campos disponibles: {list(fields_info['unique_values'].keys())}"
-                })
-            if value not in fields_info["unique_values"][field]:
-                return json.dumps({
-                    "status": "invalid_filter",
-                    "message": f"El valor '{value}' no es válido para el campo '{field}'. Valores disponibles: {fields_info['unique_values'][field]}"
-                })
-
-        # 4. Determinar máquinas
-        all_machines = fields_info["unique_values"].get("machine", [])
-        target_machines = [machine] if machine else all_machines
-
-        if machine and machine not in all_machines:
             return json.dumps({
-                "status": "invalid_filter",
-                "message": f"La máquina '{machine}' no es válida. Máquinas disponibles: {all_machines}"
-            })
-
-        # 5. Cargar reglas SOP
-        machines_rules = {}
-        for machine_name in target_machines:
-            sop_result = json.loads(await load_sop(ctx, machine_name))
+                "status": "error",
+                "message": "No se pudo obtener la estructura de campos",
+                "results": []
+            }, ensure_ascii=False)
+        
+        valid_key_figures = fields_info["key_figures"]
+        valid_key_values = fields_info["key_values"]
+        
+        # Validar key_figures
+        invalid_figures = [f for f in key_figures if f not in valid_key_figures]
+        if invalid_figures:
+            return json.dumps({
+                "status": "error",
+                "message": f"Key figures inválidos: {invalid_figures}. Válidos: {valid_key_figures}",
+                "results": []
+            }, ensure_ascii=False)
+        
+        # Validar key_values
+        invalid_values = {k: v for k, v in key_values.items() if k not in valid_key_values or v not in valid_key_values.get(k, [])}
+        if invalid_values:
+            return json.dumps({
+                "status": "error",
+                "message": f"Key values inválidos: {invalid_values}. Campos válidos: {list(valid_key_values.keys())}",
+                "results": []
+            }, ensure_ascii=False)
+        
+        # Obtener datos MES
+        fetch_result = json.loads(await fetch_mes_data(
+            ctx,
+            key_values=key_values,
+            key_figures=key_figures,
+            time_filter=time_filter
+        ))
+        
+        if fetch_result["status"] != "success":
+            return json.dumps({
+                "status": "error",
+                "message": f"No se pudieron obtener datos: {fetch_result.get('message', '')}",
+                "results": []
+            }, ensure_ascii=False)
+        
+        # Procesar máquinas únicas en los resultados
+        unique_machines = {record["machine"] for record in fetch_result["data"]}
+        
+        # Cargar reglas SOP para cada máquina
+        sop_coverage = {"with_sop": 0, "without_sop": 0}
+        machine_rules = {}
+        
+        for machine in unique_machines:
+            sop_result = json.loads(await load_sop(ctx, machine))
             if sop_result["status"] in ["success", "exists"]:
-                machines_rules[machine_name] = sop_result.get("rules", {})
+                machine_rules[machine] = sop_result["rules"]
+                sop_coverage["with_sop"] += 1
             else:
-                machines_rules[machine_name] = {"status": "no_sop"}
-
-        # 6. Determinar campos numéricos
-        numeric_fields = focus_numeric_fields if focus_numeric_fields else fields_info["fields"]["numeric"]
-
-        # 7. Obtener y procesar datos
-        all_results = []
-        for machine_name in target_machines:
-            fetch_result = json.loads(await fetch_mes_data(
-                ctx,
-                machine=machine_name,
-                start_date=start_date,
-                end_date=end_date,
-                specific_date=specific_date,
-                fields=list(set(numeric_fields + ["id", "date", "machine"] + list(norm_filters.keys())))
-            ))
-
-            if fetch_result["status"] != "success" or not fetch_result["data"]:
-                filter_desc = f"máquina '{machine_name}'"
-                if specific_date:
-                    filter_desc += f" en {specific_date}"
-                if norm_filters:
-                    filter_desc += f" con filtros {norm_filters}"
-                return json.dumps({
-                    "status": "no_data",
-                    "message": f"No se encontraron datos para {filter_desc}",
-                    "results": []
-                })
-
-            # Filtrar registros
-            filtered_data = []
-            for record in fetch_result["data"]:
-                match = True
-                for field, value in norm_filters.items():
-                    if str(record.get(field)) != value:
-                        match = False
-                        break
-                if match:
-                    filtered_data.append(record)
-
-            if not filtered_data:
-                filter_desc = f"máquina '{machine_name}'"
-                if specific_date:
-                    filter_desc += f" en {specific_date}"
-                if norm_filters:
-                    filter_desc += f" con filtros {norm_filters}"
-                return json.dumps({
-                    "status": "no_data",
-                    "message": f"No se encontraron datos para {filter_desc}",
-                    "results": []
-                })
-
-            # Procesar cumplimiento
-            for record in filtered_data:
-                entry = {
-                    "id": record["id"],
-                    "date": record["date"],
-                    "machine": record["machine"],
-                    "metrics": {},
-                    "compliance_status": {},
-                    "sop_status": "available" if machines_rules[machine_name].get("status") != "no_sop" else "not_available",
-                    "filtered_fields": norm_filters
-                }
-
-                total_metrics = 0
-                compliant_metrics = 0
-                for field in numeric_fields:
-                    if field in record:
-                        total_metrics += 1
-                        metric_value = record[field]
-                        entry["metrics"][field] = metric_value
-                        rule = machines_rules[machine_name].get(field)
-                        if rule and "value" in rule:
-                            rule_value = rule["value"]
-                            operator = rule["operator"]
-                            unit = rule["unit"]
-                            is_compliant = (
-                                metric_value <= rule_value if operator == "<=" else
-                                metric_value >= rule_value
-                            )
-                            entry["compliance_status"][field] = {
-                                "value": metric_value,
-                                "rule": f"{operator} {rule_value}{unit}",
-                                "status": "compliant" if is_compliant else "non_compliant"
-                            }
-                            if is_compliant:
-                                compliant_metrics += 1
-                        else:
-                            entry["compliance_status"][field] = {
-                                "value": metric_value,
-                                "rule": "no_rule_defined",
-                                "status": "unknown"
-                            }
-
-                compliance_percentage = (compliant_metrics / total_metrics * 100) if total_metrics > 0 else 0
-                entry["compliance_percentage"] = round(compliance_percentage, 2)
-
-                all_results.append(entry)
-
-        # 8. Resumen de SOPs
-        sop_summary = {
-            "machines_with_sop": sum(1 for rules in machines_rules.values() if rules.get("status") != "no_sop"),
-            "machines_without_sop": sum(1 for rules in machines_rules.values() if rules.get("status") == "no_sop")
-        }
-
+                machine_rules[machine] = {}
+                sop_coverage["without_sop"] += 1
+        
+        # Analizar cumplimiento para cada registro
+        results = []
+        for record in fetch_result["data"]:
+            analysis = {
+                "id": record["id"],
+                "date": record["date"],
+                "machine": record["machine"],
+                "metrics": {},
+                "compliance": {},
+                "compliance_percentage": 0.0
+            }
+            
+            # Contadores para el porcentaje de cumplimiento
+            total_metrics = 0
+            compliant_metrics = 0
+            
+            # Evaluar cada métrica solicitada
+            for metric in key_figures:
+                if metric not in record:
+                    continue
+                    
+                metric_value = record[metric]
+                analysis["metrics"][metric] = metric_value
+                total_metrics += 1
+                
+                # Verificar si existe regla para esta métrica
+                rules = machine_rules.get(record["machine"], {})
+                if metric in rules:
+                    rule = rules[metric]
+                    operator = rule["operator"]
+                    rule_value = rule["value"]
+                    
+                    # Evaluar cumplimiento
+                    is_compliant = (
+                        (metric_value >= rule_value) if operator == ">=" else
+                        (metric_value <= rule_value)
+                    )
+                    
+                    analysis["compliance"][metric] = {
+                        "value": metric_value,
+                        "rule": f"{operator} {rule_value}{rule.get('unit', '')}",
+                        "status": "compliant" if is_compliant else "non_compliant"
+                    }
+                    
+                    if is_compliant:
+                        compliant_metrics += 1
+                else:
+                    analysis["compliance"][metric] = {
+                        "value": metric_value,
+                        "rule": "no_rule_defined",
+                        "status": "unknown"
+                    }
+            
+            # Calcular porcentaje de cumplimiento
+            if total_metrics > 0:
+                analysis["compliance_percentage"] = round(
+                    (compliant_metrics / total_metrics) * 100, 2
+                )
+            
+            results.append(analysis)
+        
+        # Determinar descripción del período
+        tf = TimeFilter(**time_filter)
+        tf.validate_dates()
+        period = (
+            tf.specific_date if tf.specific_date else
+            f"{tf.start_date} a {tf.end_date}" if tf.start_date and tf.end_date else
+            "sin filtro temporal"
+        )
+        
         return json.dumps({
             "status": "success",
-            "period": specific_date or f"{start_date} a {end_date}",
-            "machine_filter": machine or "all_machines",
-            "numeric_fields_analyzed": numeric_fields,
-            "categorical_filters_applied": norm_filters,
-            "sop_summary": sop_summary,
-            "results": all_results,
-            "analysis_note": "Cada métrica incluye valor actual, regla SOP, y estado de cumplimiento (compliant/non_compliant/unknown)"
+            "period": period,
+            "machine_filter": key_values.get("machine", "todas las máquinas"),
+            "metrics_analyzed": key_figures,
+            "results": results,
+            "sop_coverage": f"{sop_coverage['with_sop']}/{len(unique_machines)} máquinas con SOP",
+            "analysis_notes": [
+                "compliant: Cumple con la regla SOP",
+                "non_compliant: No cumple con la regla SOP",
+                "unknown: No hay regla definida para esta métrica"
+            ]
         }, ensure_ascii=False)
-
+        
     except Exception as e:
-        logger.error(f"Error en analyze_compliance: {str(e)}", exc_info=True)
+        logger.error("Error en analyze_compliance: %s", str(e))
         return json.dumps({
             "status": "error",
-            "message": f"Error al analizar cumplimiento: {str(e)}",
-            "parameters_received": {
-                "machine": machine,
-                "date_range": f"{start_date} to {end_date}",
-                "numeric_fields": focus_numeric_fields,
-                "categorical_filters": categorical_filters
-            }
+            "message": f"Error en el análisis: {str(e)}",
+            "results": []
         }, ensure_ascii=False)
 
+# Punto de entrada principal
 if __name__ == "__main__":
     init_collections()
     mcp.run()
