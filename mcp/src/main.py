@@ -10,43 +10,42 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 import json
 import hashlib
+from minio import Minio
+from minio.error import S3Error
+import pdfplumber
+import io
+import os
 
 # Inicialización del servicio MCP
 mcp = FastMCP("Manufacturing Compliance Processor")
 
 # Configuración global
-API_URL = "http://api:5000"  # URL de la API de manufactura
-model = SentenceTransformer('all-MiniLM-L6-v2')  # Modelo de embeddings
-qdrant_client = QdrantClient(host="qdrant", port=6333)  # Cliente de Qdrant
+API_URL = os.getenv("API_URL", "http://api:5000")
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "sop-pdfs")
+model = SentenceTransformer('all-MiniLM-L6-v2')
+qdrant_client = QdrantClient(host="qdrant", port=6333)
+
+# Inicialización del cliente MinIO
+minio_client = Minio(
+    MINIO_ENDPOINT,
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=False  # Cambiar a True en producción con SSL
+)
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class TimeFilter(BaseModel):
-    """
-    Modelo para validación de filtros temporales en consultas MES.
-    
-    Atributos:
-        start_date (str, opcional): Fecha de inicio en formato YYYY-MM-DD.
-        end_date (str, opcional): Fecha de fin en formato YYYY-MM-DD.
-        specific_date (str, opcional): Fecha específica en formato YYYY-MM-DD.
-    
-    Notas:
-        - specific_date tiene prioridad sobre start_date/end_date
-        - Valida el formato de fecha y coherencia temporal
-    """
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     specific_date: Optional[str] = None
 
     def validate_dates(self):
-        """
-        Valida el formato y coherencia de las fechas proporcionadas.
-        
-        Raises:
-            ValueError: Si las fechas tienen formato incorrecto o son incoherentes.
-        """
         date_formats = []
         try:
             if self.specific_date:
@@ -67,23 +66,7 @@ class TimeFilter(BaseModel):
             raise ValueError(error_msg) from e
 
 def init_collections():
-    """
-    Inicializa las colecciones en Qdrant para almacenamiento de datos.
-    
-    Crea dos colecciones:
-    1. 'mes_logs': Para registros de manufactura con embeddings
-    2. 'sop_pdfs': Para documentos SOP con sus reglas extraídas
-    
-    Configura:
-    - Vectores de 384 dimensiones usando el modelo SentenceTransformer
-    - Distancia coseno para similitud
-    - Optimizaciones para manejo de grandes volúmenes
-    
-    Raises:
-        RuntimeError: Si falla la creación de las colecciones
-    """
     try:
-        # Configuración común para ambas colecciones
         vector_config = models.VectorParams(
             size=384,
             distance=models.Distance.COSINE
@@ -93,19 +76,17 @@ def init_collections():
             memmap_threshold=20000
         )
         
-        # Colección para registros MES
         qdrant_client.recreate_collection(
             collection_name="mes_logs",
             vectors_config=vector_config,
             optimizers_config=optimizer_config
         )
         
-        # Colección para documentos SOP
         qdrant_client.recreate_collection(
             collection_name="sop_pdfs",
             vectors_config=vector_config,
             optimizers_config=models.OptimizersConfigDiff(
-                indexing_threshold=0,  # Indexar todo inmediatamente
+                indexing_threshold=0,
                 memmap_threshold=20000
             )
         )
@@ -114,40 +95,19 @@ def init_collections():
         logger.error("Error inicializando Qdrant: %s", str(e))
         raise RuntimeError("No se pudieron inicializar las colecciones") from e
 
+def init_minio_bucket():
+    try:
+        if not minio_client.bucket_exists(MINIO_BUCKET):
+            minio_client.make_bucket(MINIO_BUCKET)
+            logger.info(f"Bucket {MINIO_BUCKET} creado en MinIO")
+        else:
+            logger.info(f"Bucket {MINIO_BUCKET} ya existe en MinIO")
+    except S3Error as e:
+        logger.error("Error inicializando bucket en MinIO: %s", str(e))
+        raise RuntimeError("No se pudo inicializar el bucket de MinIO") from e
+
 @mcp.tool()
 async def list_fields(ctx: Context) -> str:
-    """
-    Obtiene la estructura de campos disponibles en los datos MES.
-    
-    Procesa:
-    1. Consulta todos los registros MES disponibles
-    2. Clasifica campos en numéricos (key_figures) y categóricos (key_values)
-    3. Identifica valores únicos para campos categóricos
-    
-    Returns:
-        str: JSON con estructura:
-            {
-                "status": "success"|"error"|"no_data",
-                "key_figures": ["uptime", "temperature", ...],
-                "key_values": {
-                    "machine": ["ModelA", "ModelB", ...],
-                    "production_line": ["Line1", "Line2", ...],
-                    ...
-                },
-                "message": str  # Solo en casos de error
-            }
-    
-    Example:
-        >>> list_fields()
-        {
-            "status": "success",
-            "key_figures": ["uptime", "temperature", "defects"],
-            "key_values": {
-                "machine": ["ModelA", "ModelB"],
-                "production_line": ["Line1", "Line2"]
-            }
-        }
-    """
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{API_URL}/machines/")
@@ -162,7 +122,6 @@ async def list_fields(ctx: Context) -> str:
                 "key_values": {}
             })
 
-        # Clasificación de campos
         sample_record = records[0]
         key_figures = []
         key_values = {}
@@ -199,52 +158,10 @@ async def fetch_mes_data(
     key_figures: Optional[List[str]] = None,
     time_filter: Optional[Dict[str, str]] = None
 ) -> str:
-    """
-    Recupera datos del MES con filtros avanzados.
-    
-    Args:
-        key_values: Filtros categóricos ej. {"machine": "ModelA", "production_line": "Line1"}
-        key_figures: Campos numéricos a incluir ej. ["uptime", "temperature"]
-        time_filter: {"start_date": "2025-01-01", "end_date": "2025-01-31"} o {"specific_date": "2025-01-15"}
-    
-    Returns:
-        str: JSON con estructura:
-            {
-                "status": "success"|"error",
-                "count": int,
-                "data": [
-                    {
-                        "id": str,
-                        "date": str,
-                        "machine": str,
-                        ...key_figures
-                    },
-                    ...
-                ],
-                "message": str  # Solo en error
-            }
-    
-    Example:
-        >>> fetch_mes_data(
-                key_values={"machine": "ModelA"},
-                key_figures=["uptime", "temperature"],
-                time_filter={"start_date": "2025-01-01", "end_date": "2025-01-31"}
-            )
-        {
-            "status": "success",
-            "count": 10,
-            "data": [
-                {"id": "1", "date": "2025-01-01", "machine": "ModelA", "uptime": 95.0, "temperature": 72.0},
-                ...
-            ]
-        }
-    """
     try:
-        # Validación de parámetros
         key_values = key_values or {}
         key_figures = key_figures or []
         
-        # Procesamiento del filtro temporal
         query_params = {}
         if time_filter:
             tf = TimeFilter(**time_filter)
@@ -258,24 +175,20 @@ async def fetch_mes_data(
                 if tf.end_date:
                     query_params["end_date"] = tf.end_date
 
-        # Construcción del endpoint
         endpoint = f"{API_URL}/machines/"
         if "machine" in key_values:
             endpoint = f"{API_URL}/machines/{key_values['machine']}"
 
-        # Consulta a la API
         async with httpx.AsyncClient() as client:
             response = await client.get(endpoint, params=query_params)
             response.raise_for_status()
             data = response.json()
 
-        # Filtrado adicional por key_values
         filtered_data = [
             record for record in data
             if all(record.get(k) == v for k, v in key_values.items() if k != "machine")
         ]
 
-        # Selección de campos
         processed_data = []
         for record in filtered_data:
             item = {
@@ -284,14 +197,12 @@ async def fetch_mes_data(
                 "machine": record["machine"]
             }
             
-            # Agregar key_figures solicitados
             for field in key_figures:
                 if field in record:
                     item[field] = record[field]
             
             processed_data.append(item)
 
-        # Almacenamiento en Qdrant
         if processed_data:
             points = []
             for record in processed_data:
@@ -326,43 +237,7 @@ async def fetch_mes_data(
 
 @mcp.tool()
 async def load_sop(ctx: Context, machine: str) -> str:
-    """
-    Carga y procesa un documento SOP para una máquina específica.
-    
-    Args:
-        machine: Nombre de la máquina (ej. "ModelA")
-    
-    Process:
-        1. Verifica si ya existe en Qdrant
-        2. Descarga el PDF correspondiente (machine.pdf)
-        3. Extrae reglas usando expresiones regulares
-        4. Almacena en Qdrant con embeddings
-    
-    Returns:
-        str: JSON con estructura:
-            {
-                "status": "success"|"exists"|"error",
-                "machine": str,
-                "rules": {
-                    "uptime": {"value": 95.0, "operator": ">=", "unit": "%"},
-                    ...
-                },
-                "message": str  # Solo en error
-            }
-    
-    Example:
-        >>> load_sop("ModelA")
-        {
-            "status": "success",
-            "machine": "ModelA",
-            "rules": {
-                "uptime": {"value": 95.0, "operator": ">=", "unit": "%", "source_text": "uptime >= 95%"},
-                "temperature": {"value": 75.0, "operator": "<=", "unit": "°C", "source_text": "temperature <= 75°C"}
-            }
-        }
-    """
     try:
-        # Verificar existencia previa
         existing = qdrant_client.scroll(
             collection_name="sop_pdfs",
             scroll_filter=models.Filter(
@@ -378,27 +253,55 @@ async def load_sop(ctx: Context, machine: str) -> str:
                 "rules": existing[0][0].payload["rules"]
             }, ensure_ascii=False)
 
-        # Descargar contenido del PDF
         pdf_name = f"{machine}.pdf"
-        async with httpx.AsyncClient() as client:
-            # Verificar disponibilidad
-            list_response = await client.get(f"{API_URL}/pdfs/list")
-            available_pdfs = [pdf["filename"] for pdf in list_response.json()]
+        
+        try:
+            objects = minio_client.list_objects(MINIO_BUCKET, prefix=pdf_name)
+            pdf_exists = any(obj.object_name == pdf_name for obj in objects)
             
-            if pdf_name not in available_pdfs:
+            if not pdf_exists:
+                available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
                 return json.dumps({
                     "status": "error",
-                    "message": f"PDF {pdf_name} no encontrado. Disponibles: {', '.join(available_pdfs)}"
+                    "message": f"PDF {pdf_name} no encontrado en MinIO. Disponibles: {', '.join(available_pdfs)}",
+                    "machine": machine,
+                    "rules": {}
                 }, ensure_ascii=False)
             
-            # Obtener contenido
-            content_response = await client.get(
-                f"{API_URL}/pdfs/content/",
-                params={"filenames": [pdf_name], "max_length": 10000}
-            )
-            content = content_response.json()["pdfs"][0]["content"]
+            response = minio_client.get_object(MINIO_BUCKET, pdf_name)
+            pdf_data = response.read()
+            response.close()
+            response.release_conn()
+            
+        except S3Error as e:
+            logger.error("Error accediendo a MinIO para %s: %s", pdf_name, str(e))
+            return json.dumps({
+                "status": "error",
+                "message": f"Error al acceder al PDF en MinIO: {str(e)}",
+                "machine": machine,
+                "rules": {}
+            }, ensure_ascii=False)
 
-        # Extracción de reglas con patrones robustos
+        try:
+            with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
+                content = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        except Exception as e:
+            logger.error("Error extrayendo texto de %s: %s", pdf_name, str(e))
+            return json.dumps({
+                "status": "error",
+                "message": f"Error al extraer texto del PDF: {str(e)}",
+                "machine": machine,
+                "rules": {}
+            }, ensure_ascii=False)
+
+        if not content.strip():
+            return json.dumps({
+                "status": "error",
+                "message": f"El PDF {pdf_name} está vacío o no contiene texto extraíble",
+                "machine": machine,
+                "rules": {}
+            }, ensure_ascii=False)
+
         rule_patterns = [
             (r"(?P<field>uptime|tiempo de actividad)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*%", "uptime", ">=", "%"),
             (r"(?P<field>temperature|temperatura)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*°C", "temperature", "<=", "°C"),
@@ -429,7 +332,6 @@ async def load_sop(ctx: Context, machine: str) -> str:
                 "rules": {}
             }, ensure_ascii=False)
 
-        # Almacenamiento en Qdrant
         embedding = model.encode(content).tolist()
         qdrant_client.upsert(
             collection_name="sop_pdfs",
@@ -466,86 +368,11 @@ async def analyze_compliance(
     key_figures: Optional[List[str]] = None,
     time_filter: Optional[Dict[str, str]] = None
 ) -> str:
-    """
-    Analiza el cumplimiento de métricas MES contra reglas SOP.
-    
-    Args:
-        key_values: Filtros categóricos ej. {"machine": "ModelA"}
-        key_figures: Métricas a analizar ej. ["uptime", "temperature"]
-        time_filter: Rango de fechas ej. {"start_date": "2025-01-01", "end_date": "2025-01-31"}
-    
-    Process:
-        1. Valida parámetros de entrada
-        2. Obtiene datos MES con los filtros
-        3. Carga reglas SOP para las máquinas involucradas
-        4. Evalúa cumplimiento métrica por métrica
-    
-    Returns:
-        str: JSON con estructura:
-            {
-                "status": "success"|"error",
-                "period": str,
-                "machine_filter": str,
-                "metrics_analyzed": [str],
-                "results": [
-                    {
-                        "id": str,
-                        "date": str,
-                        "machine": str,
-                        "metrics": {"uptime": 95.0, ...},
-                        "compliance": {
-                            "uptime": {
-                                "value": 95.0,
-                                "rule": ">= 95%",
-                                "status": "compliant"
-                            },
-                            ...
-                        },
-                        "compliance_percentage": float
-                    },
-                    ...
-                ],
-                "sop_coverage": str,
-                "message": str  # Solo en error
-            }
-    
-    Example:
-        >>> analyze_compliance(
-                key_values={"machine": "ModelA"},
-                key_figures=["uptime"],
-                time_filter={"specific_date": "2025-01-01"}
-            )
-        {
-            "status": "success",
-            "period": "2025-01-01",
-            "machine_filter": "ModelA",
-            "metrics_analyzed": ["uptime"],
-            "results": [
-                {
-                    "id": "123",
-                    "date": "2025-01-01",
-                    "machine": "ModelA",
-                    "metrics": {"uptime": 96.0},
-                    "compliance": {
-                        "uptime": {
-                            "value": 96.0,
-                            "rule": ">= 95%",
-                            "status": "compliant"
-                        }
-                    },
-                    "compliance_percentage": 100.0
-                }
-            ],
-            "sop_coverage": "1/1 máquinas con SOP"
-        }
-    """
     try:
-        # Validación inicial
         key_values = key_values or {}
         key_figures = key_figures or []
         time_filter = time_filter or {}
         
-        # Obtener estructura de campos válidos
         fields_info = json.loads(await list_fields(ctx))
         if fields_info["status"] != "success":
             return json.dumps({
@@ -557,7 +384,6 @@ async def analyze_compliance(
         valid_key_figures = fields_info["key_figures"]
         valid_key_values = fields_info["key_values"]
         
-        # Validar key_figures
         invalid_figures = [f for f in key_figures if f not in valid_key_figures]
         if invalid_figures:
             return json.dumps({
@@ -566,7 +392,6 @@ async def analyze_compliance(
                 "results": []
             }, ensure_ascii=False)
         
-        # Validar key_values
         invalid_values = {k: v for k, v in key_values.items() if k not in valid_key_values or v not in valid_key_values.get(k, [])}
         if invalid_values:
             return json.dumps({
@@ -575,7 +400,6 @@ async def analyze_compliance(
                 "results": []
             }, ensure_ascii=False)
         
-        # Obtener datos MES
         fetch_result = json.loads(await fetch_mes_data(
             ctx,
             key_values=key_values,
@@ -590,10 +414,8 @@ async def analyze_compliance(
                 "results": []
             }, ensure_ascii=False)
         
-        # Procesar máquinas únicas en los resultados
         unique_machines = {record["machine"] for record in fetch_result["data"]}
         
-        # Cargar reglas SOP para cada máquina
         sop_coverage = {"with_sop": 0, "without_sop": 0}
         machine_rules = {}
         
@@ -606,7 +428,6 @@ async def analyze_compliance(
                 machine_rules[machine] = {}
                 sop_coverage["without_sop"] += 1
         
-        # Analizar cumplimiento para cada registro
         results = []
         for record in fetch_result["data"]:
             analysis = {
@@ -618,11 +439,9 @@ async def analyze_compliance(
                 "compliance_percentage": 0.0
             }
             
-            # Contadores para el porcentaje de cumplimiento
             total_metrics = 0
             compliant_metrics = 0
             
-            # Evaluar cada métrica solicitada
             for metric in key_figures:
                 if metric not in record:
                     continue
@@ -631,14 +450,12 @@ async def analyze_compliance(
                 analysis["metrics"][metric] = metric_value
                 total_metrics += 1
                 
-                # Verificar si existe regla para esta métrica
                 rules = machine_rules.get(record["machine"], {})
                 if metric in rules:
                     rule = rules[metric]
                     operator = rule["operator"]
                     rule_value = rule["value"]
                     
-                    # Evaluar cumplimiento
                     is_compliant = (
                         (metric_value >= rule_value) if operator == ">=" else
                         (metric_value <= rule_value)
@@ -659,7 +476,6 @@ async def analyze_compliance(
                         "status": "unknown"
                     }
             
-            # Calcular porcentaje de cumplimiento
             if total_metrics > 0:
                 analysis["compliance_percentage"] = round(
                     (compliant_metrics / total_metrics) * 100, 2
@@ -667,7 +483,6 @@ async def analyze_compliance(
             
             results.append(analysis)
         
-        # Determinar descripción del período
         tf = TimeFilter(**time_filter)
         tf.validate_dates()
         period = (
@@ -698,7 +513,7 @@ async def analyze_compliance(
             "results": []
         }, ensure_ascii=False)
 
-# Punto de entrada principal
 if __name__ == "__main__":
     init_collections()
+    init_minio_bucket()
     mcp.run()

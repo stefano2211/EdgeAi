@@ -18,12 +18,19 @@ services:
     container_name: mcp
     ports:
       - "8000:8000"
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=sop-pdfs
     depends_on:
       api:
         condition: service_started
       qdrant:
         condition: service_started
       ollama:
+        condition: service_started
+      minio:
         condition: service_started
     command: >
       sh -c "pip install mcpo && mcpo --port 8000 -- python src/main.py"
@@ -71,6 +78,21 @@ services:
     networks:
       - mes-network
 
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"  # Puerto API
+      - "9001:9001"  # Puerto consola
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - mes-network
+
 networks:
   mes-network:
     driver: bridge
@@ -80,3 +102,4 @@ volumes:
   qdrant_data:
   openwebui_data:
   ollama_data:
+  minio_data:
