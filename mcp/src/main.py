@@ -108,6 +108,22 @@ def init_minio_bucket():
 
 @mcp.tool()
 async def list_fields(ctx: Context) -> str:
+    """
+    Lista los campos disponibles en los registros del MES (Manufacturing Execution System).
+    
+    Devuelve:
+        - key_figures: Campos numéricos disponibles para análisis
+        - key_values: Valores únicos para campos categóricos
+    
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"error"|"no_data",
+                "key_figures": [str],  # Lista de campos numéricos
+                "key_values": {str: [str]},  # Diccionario de campos categóricos con valores únicos
+                "message": str  # Solo en caso de error o sin datos
+            }
+    """
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{API_URL}/machines/")
@@ -158,6 +174,24 @@ async def fetch_mes_data(
     key_figures: Optional[List[str]] = None,
     time_filter: Optional[Dict[str, str]] = None
 ) -> str:
+    """
+    Recupera datos del MES aplicando filtros y almacena los resultados en Qdrant para búsquedas semánticas.
+    
+    Args:
+        ctx: Contexto de FastMCP
+        key_values: Filtros por valores específicos (e.g., {"machine": "CNC-01"})
+        key_figures: Lista de métricas numéricas a incluir
+        time_filter: Rango de fechas (e.g., {"start_date": "2025-01-01", "end_date": "2025-01-31"})
+    
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"error",
+                "count": int,  # Número de registros devueltos
+                "data": [dict],  # Registros del MES
+                "message": str  # Solo en caso de error
+            }
+    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
@@ -237,6 +271,32 @@ async def fetch_mes_data(
 
 @mcp.tool()
 async def load_sop(ctx: Context, machine: str) -> str:
+    """
+    Carga y procesa el PDF de SOP (Standard Operating Procedure) para una máquina específica.
+    
+    Extrae reglas de cumplimiento del texto del PDF y las almacena en Qdrant para su posterior análisis.
+    
+    Args:
+        ctx: Contexto de FastMCP
+        machine: Nombre de la máquina (e.g., "CNC-01")
+    
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"exists"|"error",
+                "machine": str,
+                "rules": {
+                    "metric_name": {
+                        "value": float,
+                        "operator": ">="|"<=",
+                        "unit": str,
+                        "source_text": str
+                    },
+                    ...
+                },
+                "message": str  # Solo en caso de error
+            }
+    """
     try:
         existing = qdrant_client.scroll(
             collection_name="sop_pdfs",
@@ -368,6 +428,47 @@ async def analyze_compliance(
     key_figures: Optional[List[str]] = None,
     time_filter: Optional[Dict[str, str]] = None
 ) -> str:
+    """
+    Analiza el cumplimiento de métricas de producción contra las reglas definidas en los SOP.
+    
+    Combina datos del MES con reglas de SOP para evaluar conformidad.
+    
+    Args:
+        ctx: Contexto de FastMCP
+        key_values: Filtros por valores específicos (e.g., {"machine": "CNC-01"})
+        key_figures: Lista de métricas numéricas a analizar (e.g., ["uptime", "temperature"])
+        time_filter: Rango de fechas (e.g., {"start_date": "2025-01-01", "end_date": "2025-01-31"})
+    
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"error",
+                "period": str,  # Período analizado
+                "machine_filter": str,  # Máquina(s) filtradas
+                "metrics_analyzed": [str],
+                "results": [
+                    {
+                        "id": str,
+                        "date": str,
+                        "machine": str,
+                        "metrics": {str: float},
+                        "compliance": {
+                            "metric_name": {
+                                "value": float,
+                                "rule": str,
+                                "status": "compliant"|"non_compliant"|"unknown"
+                            },
+                            ...
+                        },
+                        "compliance_percentage": float
+                    },
+                    ...
+                ],
+                "sop_coverage": str,  # Porcentaje de máquinas con SOP
+                "analysis_notes": [str],
+                "message": str  # Solo en caso de error
+            }
+    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
