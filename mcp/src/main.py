@@ -426,7 +426,7 @@ async def analyze_compliance(
                 sop_coverage["with_sop"] += 1
             else:
                 machine_rules[machine] = {}
-                sop_coverage["without_sop"] += 1
+                sop_coverage["without_sop"] = 1
         
         results = []
         for record in fetch_result["data"]:
@@ -507,6 +507,182 @@ async def analyze_compliance(
         
     except Exception as e:
         logger.error("Error en analyze_compliance: %s", str(e))
+        return json.dumps({
+            "status": "error",
+            "message": f"Error en el análisis: {str(e)}",
+            "results": []
+        }, ensure_ascii=False)
+
+
+
+@mcp.tool()
+async def analyze_all_machines_compliance(
+    ctx: Context,
+    key_figures: Optional[List[str]] = None,
+    time_filter: Optional[Dict[str, str]] = None
+) -> str:
+    """
+    Analiza el cumplimiento de todas las máquinas contra las reglas SOP.
+
+    Args:
+        ctx: Contexto de FastMCP.
+        key_figures: Lista de métricas numéricas a analizar (e.g., ["uptime", "temperature"]).
+        time_filter: Filtro temporal (e.g., {"start_date": "2025-01-01", "end_date": "2025-01-31"}).
+
+    Returns:
+        str: JSON con estructura:
+            {
+                "status": "success"|"error",
+                "period": str,
+                "metrics_analyzed": [str],
+                "results": [
+                    {
+                        "id": str,
+                        "date": str,
+                        "machine": str,
+                        "metrics": {str: float},
+                        "compliance": {str: {...}},
+                        "compliance_percentage": float
+                    },
+                    ...
+                ],
+                "sop_coverage": str,
+                "analysis_notes": [str],
+                "message": str  # Solo en error
+            }
+    """
+    try:
+        key_figures = key_figures or []
+        time_filter = time_filter or {}
+
+        # Validar métricas
+        fields_info = json.loads(await list_fields(ctx))
+        if fields_info["status"] != "success":
+            return json.dumps({
+                "status": "error",
+                "message": "No se pudo obtener la estructura de campos",
+                "results": []
+            }, ensure_ascii=False)
+
+        valid_key_figures = fields_info["key_figures"]
+        invalid_figures = [f for f in key_figures if f not in valid_key_figures]
+        if invalid_figures:
+            return json.dumps({
+                "status": "error",
+                "message": f"Key figures inválidos: {invalid_figures}. Válidos: {valid_key_figures}",
+                "results": []
+            }, ensure_ascii=False)
+
+        # Recuperar datos MES para todas las máquinas
+        fetch_result = json.loads(await fetch_mes_data(
+            ctx,
+            key_values={},  # Sin filtro por máquina
+            key_figures=key_figures,
+            time_filter=time_filter
+        ))
+
+        if fetch_result["status"] != "success":
+            return json.dumps({
+                "status": "error",
+                "message": f"No se pudieron obtener datos: {fetch_result.get('message', '')}",
+                "results": []
+            }, ensure_ascii=False)
+
+        unique_machines = {record["machine"] for record in fetch_result["data"]}
+
+        # Cargar reglas SOP para cada máquina
+        sop_coverage = {"with_sop": 0, "without_sop": 0}
+        machine_rules = {}
+        for machine in unique_machines:
+            sop_result = json.loads(await load_sop(ctx, machine))
+            if sop_result["status"] in ["success", "exists"]:
+                machine_rules[machine] = sop_result["rules"]
+                sop_coverage["with_sop"] += 1
+            else:
+                machine_rules[machine] = {}
+                sop_coverage["without_sop"] += 1
+
+        # Analizar cumplimiento
+        results = []
+        for record in fetch_result["data"]:
+            analysis = {
+                "id": record["id"],
+                "date": record["date"],
+                "machine": record["machine"],
+                "metrics": {},
+                "compliance": {},
+                "compliance_percentage": 0.0
+            }
+
+            total_metrics = 0
+            compliant_metrics = 0
+
+            for metric in key_figures:
+                if metric not in record:
+                    continue
+
+                metric_value = record[metric]
+                analysis["metrics"][metric] = metric_value
+                total_metrics += 1
+
+                rules = machine_rules.get(record["machine"], {})
+                if metric in rules:
+                    rule = rules[metric]
+                    operator = rule["operator"]
+                    rule_value = rule["value"]
+
+                    is_compliant = (
+                        (metric_value >= rule_value) if operator == ">=" else
+                        (metric_value <= rule_value)
+                    )
+
+                    analysis["compliance"][metric] = {
+                        "value": metric_value,
+                        "rule": f"{operator} {rule_value}{rule.get('unit', '')}",
+                        "status": "compliant" if is_compliant else "non_compliant"
+                    }
+
+                    if is_compliant:
+                        compliant_metrics += 1
+                else:
+                    analysis["compliance"][metric] = {
+                        "value": metric_value,
+                        "rule": "no_rule_defined",
+                        "status": "unknown"
+                    }
+
+            if total_metrics > 0:
+                analysis["compliance_percentage"] = round(
+                    (compliant_metrics / total_metrics) * 100, 2
+                )
+
+            results.append(analysis)
+
+        # Formatear período
+        tf = TimeFilter(**time_filter)
+        tf.validate_dates()
+        period = (
+            tf.specific_date if tf.specific_date else
+            f"{tf.start_date} a {tf.end_date}" if tf.start_date and tf.end_date else
+            "sin filtro temporal"
+        )
+
+        return json.dumps({
+            "status": "success",
+            "period": period,
+            "machine_filter": "todas las máquinas",
+            "metrics_analyzed": key_figures,
+            "results": results,
+            "sop_coverage": f"{sop_coverage['with_sop']}/{len(unique_machines)} máquinas con SOP",
+            "analysis_notes": [
+                "compliant: Cumple con la regla SOP",
+                "non_compliant: No cumple con la regla SOP",
+                "unknown: No hay regla definida para esta métrica"
+            ]
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error("Error en analyze_all_machines_compliance: %s", str(e))
         return json.dumps({
             "status": "error",
             "message": f"Error en el análisis: {str(e)}",
