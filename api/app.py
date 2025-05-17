@@ -1,301 +1,383 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
-import sqlite3
+from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from datetime import datetime
-import PyPDF2
-import json
+import sqlite3
+from datetime import datetime, timedelta
+import jwt
+import uuid
 from typing import Optional, List
-import httpx
+import os
+import logging
+
+# Configuración de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# Configuración
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")  # Cambia en producción
+ALGORITHM = "HS256"
+TOKEN_EXPIRE_MINUTES = 60  # Tokens expiran en 60 minutos
 
-class MachineRecord(BaseModel):
-    date: str  # Ejemplo: "2025-04-10"
-    machine: str  # Ejemplo: "ModelA"
-    production_line: str  # Ejemplo: "Line1"
-    material: str  # Ejemplo: "Steel"
-    batch_id: str  # Ejemplo: "BATCH101"
-    uptime: float  # Ejemplo: 95.0
-    defects: int  # Ejemplo: 2
-    vibration: float  # Ejemplo: 0.5
-    temperature: float  # Ejemplo: 75.2
-    defect_type: str  # Ejemplo: "surface_scratch"
-    throughput: float  # Ejemplo: 100.0
-    inventory_level: int  # Ejemplo: 500
+# Modelo para login
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
-# Inicialización de la base de datos con registros fijos
+# Esquema de autenticación
+security = HTTPBearer()
+
+# Inicialización de la base de datos
 def init_db():
-
-    conn = sqlite3.connect('database.db')
-    cursor = conn.cursor()
-    
-    # Crear tabla machines con batch_id
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS machines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            machine TEXT NOT NULL,
-            production_line TEXT NOT NULL,
-            material TEXT NOT NULL,
-            batch_id TEXT NOT NULL,
-            uptime REAL NOT NULL,
-            defects INTEGER NOT NULL,
-            vibration REAL NOT NULL,
-            temperature REAL NOT NULL,
-            defect_type TEXT NOT NULL,
-            throughput REAL NOT NULL,
-            inventory_level INTEGER NOT NULL
-        )
-    """)
-    
-    # Verificar si la tabla machines está vacía
-    cursor.execute("SELECT COUNT(*) FROM machines")
-    count = cursor.fetchone()[0]
-    
-    # Insertar nuevos registros fijos si la tabla está vacía
-    if count == 0:
-        fixed_records = [
-            ("2025-04-10", "ModelA", "Line3", "Steel", "BATCH101", 95.0, 2, 0.7, 75.0, "scratch", 90.0, 400),
-            ("2025-04-10", "ModelB", "Line2", "Aluminum", "BATCH102", 97.5, 1, 0.6, 70.0, "dent", 88.0, 350),
-            ("2025-04-11", "ModelC", "Line1", "Copper", "BATCH137", 87.0, 3, 0.8, 81.0, "crack", 85.0, 350),
-            ("2025-04-10", "ModelD", "Line3", "Plastic", "BATCH104", 97.5, 4, 0.9, 78.0, "warp", 87.0, 300),
-            ("2025-04-10", "ModelE", "Line2", "Brass", "BATCH105", 90.0, 2, 0.65, 72.0, "chip", 89.0, 320),
-            ("2025-04-10", "ModelF", "Line1", "Titanium", "BATCH106", 95.0, 2, 0.75, 76.0, "scratch", 91.0, 380),
-            ("2025-04-09", "ModelA", "Line1", "Aluminum", "BATCH107", 97.5, 1, 0.6, 74.0, "dent", 92.0, 410),
-            ("2025-04-09", "ModelB", "Line2", "Aluminum", "BATCH108", 92.0, 3, 0.8, 79.0, "crack", 86.0, 340),
-            ("2025-04-09", "ModelC", "Line1", "Copper", "BATCH109", 88.5, 4, 0.85, 82.0, "warp", 84.0, 360),
-            ("2025-04-09", "ModelD", "Line3", "Plastic", "BATCH110", 90.0, 2, 0.7, 77.0, "chip", 88.0, 310),
-            ("2025-04-09", "ModelE", "Line2", "Brass", "BATCH111", 99.0, 0, 0.5, 70.0, "none", 93.0, 330),
-            ("2025-04-09", "ModelF", "Line1", "Titanium", "BATCH112", 85.5, 5, 0.9, 80.0, "scratch", 83.0, 370),
-            ("2025-04-11", "ModelA", "Line1", "Steel", "BATCH113", 93.0, 1, 0.4, 73.0, "dent", 90.0, 390),
-            ("2025-04-11", "ModelB", "Line2", "Aluminum", "BATCH114", 96.5, 2, 0.7, 71.0, "crack", 89.0, 360),
-            ("2025-04-11", "ModelD", "Line3", "Plastic", "BATCH115", 89.0, 3, 0.8, 79.0, "warp", 86.0, 320),
-        ]
+    """Inicializa la base de datos SQLite con tablas para máquinas, sesiones y usuarios."""
+    try:
+        conn = sqlite3.connect('database.db')
+        cursor = conn.cursor()
         
-        cursor.executemany("""
-            INSERT INTO machines (
-                date, machine, production_line, material, batch_id, uptime, defects,
-                vibration, temperature, defect_type, throughput, inventory_level
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, fixed_records)
-    
-    # Crear tabla pdfs
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pdfs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            content TEXT NOT NULL,
-            description TEXT NOT NULL,
-            upload_timestamp DATETIME NOT NULL
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
+        # Tabla para máquinas
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS machines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                machine TEXT NOT NULL,
+                production_line TEXT NOT NULL,
+                material TEXT NOT NULL,
+                batch_id TEXT NOT NULL,
+                uptime REAL NOT NULL,
+                defects INTEGER NOT NULL,
+                vibration REAL NOT NULL,
+                temperature REAL NOT NULL,
+                defect_type TEXT NOT NULL,
+                throughput REAL NOT NULL,
+                inventory_level INTEGER NOT NULL
+            )
+        """)
+        
+        # Tabla para tokens de sesión
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                expiry DATETIME NOT NULL
+            )
+        """)
+        
+        # Tabla para usuarios
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password TEXT NOT NULL
+            )
+        """)
+        cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES (?, ?)", 
+                       ("admin", "password123"))  # Cambia en producción
+        
+        # Insertar registros fijos para máquinas
+        cursor.execute("SELECT COUNT(*) FROM machines")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            fixed_records = [
+                ("2025-04-10", "ModelA", "Line3", "Steel", "BATCH101", 95.0, 2, 0.7, 75.0, "scratch", 90.0, 400),
+                ("2025-04-10", "ModelB", "Line2", "Aluminum", "BATCH102", 97.5, 1, 0.6, 70.0, "dent", 88.0, 350),
+                ("2025-04-11", "ModelC", "Line1", "Copper", "BATCH137", 87.0, 3, 0.8, 81.0, "crack", 85.0, 350),
+                ("2025-04-10", "ModelD", "Line3", "Plastic", "BATCH104", 97.5, 4, 0.9, 78.0, "warp", 87.0, 300),
+                ("2025-04-10", "ModelE", "Line2", "Brass", "BATCH105", 90.0, 2, 0.65, 72.0, "chip", 89.0, 320),
+                ("2025-04-10", "ModelF", "Line1", "Titanium", "BATCH106", 95.0, 2, 0.75, 76.0, "scratch", 91.0, 380),
+                ("2025-04-09", "ModelA", "Line1", "Aluminum", "BATCH107", 97.5, 1, 0.6, 74.0, "dent", 92.0, 410),
+                ("2025-04-09", "ModelB", "Line2", "Aluminum", "BATCH108", 92.0, 3, 0.8, 79.0, "crack", 86.0, 340),
+                ("2025-04-09", "ModelC", "Line1", "Copper", "BATCH109", 88.5, 4, 0.85, 82.0, "warp", 84.0, 360),
+                ("2025-04-09", "ModelD", "Line3", "Plastic", "BATCH110", 90.0, 2, 0.7, 77.0, "chip", 88.0, 310),
+                ("2025-04-09", "ModelE", "Line2", "Brass", "BATCH111", 99.0, 0, 0.5, 70.0, "none", 93.0, 330),
+                ("2025-04-09", "ModelF", "Line1", "Titanium", "BATCH112", 85.5, 5, 0.9, 80.0, "scratch", 83.0, 370),
+                ("2025-04-11", "ModelA", "Line1", "Steel", "BATCH113", 93.0, 1, 0.4, 73.0, "dent", 90.0, 390),
+                ("2025-04-11", "ModelB", "Line2", "Aluminum", "BATCH114", 96.5, 2, 0.7, 71.0, "crack", 89.0, 360),
+                ("2025-04-11", "ModelD", "Line3", "Plastic", "BATCH115", 89.0, 3, 0.8, 79.0, "warp", 86.0, 320),
+            ]
+            cursor.executemany("""
+                INSERT INTO machines (
+                    date, machine, production_line, material, batch_id, uptime, defects,
+                    vibration, temperature, defect_type, throughput, inventory_level
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, fixed_records)
+        
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Database initialization failed: {str(e)}")
+        raise
+    finally:
+        conn.close()
 
 @app.on_event("startup")
 async def startup_event():
+    """Ejecuta la inicialización de la base de datos al iniciar la aplicación."""
     init_db()
 
-# Endpoint para obtener todos los registros
+# Generar token JWT
+def create_jwt_token(username: str) -> str:
+    """Genera un token JWT para un usuario dado.
+
+    Args:
+        username (str): Nombre de usuario para incluir en el token.
+
+    Returns:
+        str: Token JWT generado.
+
+    Raises:
+        Exception: Si falla la generación del token o el almacenamiento en la base de datos.
+    """
+    try:
+        expire = datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
+        to_encode = {"sub": username, "exp": expire, "jti": str(uuid.uuid4())}
+        token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        
+        # Almacenar token en la base de datos
+        conn = sqlite3.connect('database.db')
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO sessions (token, username, expiry) VALUES (?, ?, ?)",
+                       (token, username, expire.isoformat()))
+        conn.commit()
+        return token
+    except Exception as e:
+        logger.error(f"Failed to create JWT token: {str(e)}")
+        raise
+    finally:
+        conn.close()
+
+# Validar token
+async def validate_token(credentials: HTTPAuthorizationCredentials = Security(security)):
+    """Valida un token JWT proporcionado en el encabezado de autorización.
+
+    Args:
+        credentials (HTTPAuthorizationCredentials): Credenciales extraídas del encabezado.
+
+    Returns:
+        str: Nombre de usuario asociado al token.
+
+    Raises:
+        HTTPException: Si el token es inválido, expirado o no existe.
+    """
+    try:
+        token = credentials.credentials
+        conn = sqlite3.connect('database.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT username, expiry FROM sessions WHERE token = ?", (token,))
+        session = cursor.fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+        username, expiry = session
+        if datetime.fromisoformat(expiry) < datetime.utcnow():
+            raise HTTPException(status_code=401, detail="Token expired")
+        
+        # Verificar JWT
+        jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return username
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        logger.error(f"Token validation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        conn.close()
+
+# Endpoint de login
+@app.post("/login")
+async def login(request: LoginRequest):
+    """Autentica a un usuario y genera un token JWT.
+
+    Args:
+        request (LoginRequest): Objeto con username y password.
+
+    Returns:
+        dict: Diccionario con el token de acceso y el tipo de token.
+
+    Raises:
+        HTTPException: Si las credenciales son inválidas (401).
+    """
+    try:
+        conn = sqlite3.connect('database.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT password FROM users WHERE username = ?", (request.username,))
+        user = cursor.fetchone()
+        
+        if not user or user[0] != request.password:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        token = create_jwt_token(request.username)
+        return {"access_token": token, "token_type": "bearer"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Login failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        conn.close()
+
+# Endpoint para obtener todos los registros (protegido)
 @app.get("/machines/")
 async def get_all_machines(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
+    specific_date: Optional[str] = None,
+    username: str = Depends(validate_token)
 ):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    
-    base_query = """
-        SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
-               vibration, temperature, defect_type, throughput, inventory_level
-        FROM machines
-    """
-    
-    conditions = []
-    params = []
-    
-    if specific_date:
-        conditions.append("date = ?")
-        params.append(specific_date)
-    else:
-        if start_date:
-            conditions.append("date >= ?")
-            params.append(start_date)
-        if end_date:
-            conditions.append("date <= ?")
-            params.append(end_date)
-    
-    query = base_query
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    
-    query += " ORDER BY date DESC"
-    
-    cursor.execute(query, params)
-    
-    machines = []
-    for row in cursor.fetchall():
-        machines.append({
-            "id": row[0],
-            "date": row[1],
-            "machine": row[2],
-            "production_line": row[3],
-            "material": row[4],
-            "batch_id": row[5],
-            "uptime": row[6],
-            "defects": row[7],
-            "vibration": row[8],
-            "temperature": row[9],
-            "defect_type": row[10],
-            "throughput": row[11],
-            "inventory_level": row[12]
-        })
-    conn.close()
-    return machines
+    """Obtiene todos los registros de máquinas, opcionalmente filtrados por fechas.
 
-# Endpoint para obtener registros por máquina
+    Args:
+        start_date (Optional[str]): Fecha de inicio (YYYY-MM-DD).
+        end_date (Optional[str]): Fecha de fin (YYYY-MM-DD).
+        specific_date (Optional[str]): Fecha específica (YYYY-MM-DD).
+        username (str): Nombre de usuario autenticado.
+
+    Returns:
+        List[dict]: Lista de registros de máquinas.
+
+    Raises:
+        HTTPException: Si ocurre un error en la consulta (500).
+    """
+    try:
+        conn = sqlite3.connect("database.db")
+        cursor = conn.cursor()
+        
+        base_query = """
+            SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
+                   vibration, temperature, defect_type, throughput, inventory_level
+            FROM machines
+        """
+        
+        conditions = []
+        params = []
+        
+        if specific_date:
+            conditions.append("date = ?")
+            params.append(specific_date)
+        else:
+            if start_date:
+                conditions.append("date >= ?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("date <= ?")
+                params.append(end_date)
+        
+        query = base_query
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += " ORDER BY date DESC"
+        
+        cursor.execute(query, params)
+        
+        machines = []
+        for row in cursor.fetchall():
+            machines.append({
+                "id": row[0],
+                "date": row[1],
+                "machine": row[2],
+                "production_line": row[3],
+                "material": row[4],
+                "batch_id": row[5],
+                "uptime": row[6],
+                "defects": row[7],
+                "vibration": row[8],
+                "temperature": row[9],
+                "defect_type": row[10],
+                "throughput": row[11],
+                "inventory_level": row[12]
+            })
+        return machines
+    except Exception as e:
+        logger.error(f"Failed to fetch machines: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        conn.close()
+
+# Endpoint para obtener registros por máquina (protegido)
 @app.get("/machines/{machine}")
 async def get_machine_records(
     machine: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    specific_date: Optional[str] = None
+    specific_date: Optional[str] = None,
+    username: str = Depends(validate_token)
 ):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    
-    query = """
-        SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
-               vibration, temperature, defect_type, throughput, inventory_level
-        FROM machines 
-        WHERE machine = ?
+    """Obtiene registros para una máquina específica, opcionalmente filtrados por fechas.
+
+    Args:
+        machine (str): Nombre de la máquina.
+        start_date (Optional[str]): Fecha de inicio (YYYY-MM-DD).
+        end_date (Optional[str]): Fecha de fin (YYYY-MM-DD).
+        specific_date (Optional[str]): Fecha específica (YYYY-MM-DD).
+        username (str): Nombre de usuario autenticado.
+
+    Returns:
+        List[dict]: Lista de registros de la máquina.
+
+    Raises:
+        HTTPException: Si la máquina no se encuentra (404) o si ocurre un error (500).
     """
-    
-    params = [machine]
-    conditions = []
-    
-    if specific_date:
-        conditions.append("date = ?")
-        params.append(specific_date)
-    else:
-        if start_date:
-            conditions.append("date >= ?")
-            params.append(start_date)
-        if end_date:
-            conditions.append("date <= ?")
-            params.append(end_date)
-    
-    if conditions:
-        query += " AND " + " AND ".join(conditions)
-    
-    query += " ORDER BY date DESC"
-    
-    cursor.execute(query, params)
-    
-    records = []
-    for row in cursor.fetchall():
-        records.append({
-            "id": row[0],
-            "date": row[1],
-            "machine": row[2],
-            "production_line": row[3],
-            "material": row[4],
-            "batch_id": row[5],
-            "uptime": row[6],
-            "defects": row[7],
-            "vibration": row[8],
-            "temperature": row[9],
-            "defect_type": row[10],
-            "throughput": row[11],
-            "inventory_level": row[12]
-        })
-    conn.close()
-    
-    if not records:
-        raise HTTPException(status_code=404, detail="Máquina no encontrada")
-    
-    return records
-
-# Endpoints para PDFs
-@app.post("/pdfs/")
-async def upload_pdf(file: UploadFile = File(...), description: str = Form(None)):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Solo se permiten archivos PDF")
-    
-    pdf_reader = PyPDF2.PdfReader(file.file)
-    content = ""
-    for page in pdf_reader.pages:
-        content += page.extract_text() or ""
-    
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO pdfs (filename, content, description, upload_timestamp)
-        VALUES (?, ?, ?, ?)
-    """, (file.filename, content, description, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-    
-    return {"message": f"PDF '{file.filename}' subido y procesado exitosamente"}
-
-@app.get("/pdfs/list")
-async def list_pdfs():
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT filename, description FROM pdfs ORDER BY upload_timestamp DESC")
-    pdfs = [{"filename": row[0], "description": row[1]} for row in cursor.fetchall()]
-    conn.close()
-    return pdfs
-
-@app.get("/pdfs/content/")
-async def get_pdf_contents(
-    filenames: List[str] = Query(..., description="Nombres de los archivos PDF a consultar"),
-    max_length: Optional[int] = Query(None, description="Longitud máxima del contenido")
-):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    
-    normalized_filenames = [f.strip() for f in filenames]
-    placeholders = ','.join(['?'] * len(normalized_filenames))
-    
-    cursor.execute(f"""
-        SELECT filename, content, description 
-        FROM pdfs 
-        WHERE LOWER(TRIM(filename)) IN ({placeholders})
-    """, [f.lower() for f in normalized_filenames])
-    
-    results = []
-    for row in cursor.fetchall():
-        filename, content, description = row
-        results.append({
-            "filename": filename,
-            "description": description or "Sin descripción",
-            "content": content[:max_length] if max_length else content,
-            "content_length": len(content),
-            "truncated": max_length is not None and len(content) > max_length
-        })
-    
-    conn.close()
-    
-    if not results:
-        found_files = cursor.execute("SELECT filename FROM pdfs").fetchall()
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "message": "PDFs no encontrados",
-                "requested": normalized_filenames,
-                "available": [f[0] for f in found_files]
-            }
-        )
-    
-    return {
-        "count": len(results),
-        "requested_files": normalized_filenames,
-        "pdfs": results
-    }
+    try:
+        conn = sqlite3.connect("database.db")
+        cursor = conn.cursor()
+        
+        query = """
+            SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
+                   vibration, temperature, defect_type, throughput, inventory_level
+            FROM machines 
+            WHERE machine = ?
+        """
+        
+        params = [machine]
+        conditions = []
+        
+        if specific_date:
+            conditions.append("date = ?")
+            params.append(specific_date)
+        else:
+            if start_date:
+                conditions.append("date >= ?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("date <= ?")
+                params.append(end_date)
+        
+        if conditions:
+            query += " AND " + " AND ".join(conditions)
+        
+        query += " ORDER BY date DESC"
+        
+        cursor.execute(query, params)
+        
+        records = []
+        for row in cursor.fetchall():
+            records.append({
+                "id": row[0],
+                "date": row[1],
+                "machine": row[2],
+                "production_line": row[3],
+                "material": row[4],
+                "batch_id": row[5],
+                "uptime": row[6],
+                "defects": row[7],
+                "vibration": row[8],
+                "temperature": row[9],
+                "defect_type": row[10],
+                "throughput": row[11],
+                "inventory_level": row[12]
+            })
+        
+        if not records:
+            raise HTTPException(status_code=404, detail="Máquina no encontrada")
+        
+        return records
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch machine records: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     import uvicorn

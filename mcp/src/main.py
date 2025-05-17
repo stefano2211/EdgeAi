@@ -25,6 +25,8 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "sop-pdfs")
+API_USERNAME = os.getenv("API_USERNAME", "admin")
+API_PASSWORD = os.getenv("API_PASSWORD", "password123")
 
 # Component initialization
 model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -38,14 +40,126 @@ minio_client = Minio(MINIO_ENDPOINT,
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class AuthClient:
+    """Cliente HTTP para manejar autenticación y solicitudes autenticadas a la API."""
+    def __init__(self, base_url: str, username: str, password: str):
+        self.base_url = base_url
+        self.username = username
+        self.password = password
+        self.client = httpx.AsyncClient()
+        self.token = None
+
+    async def authenticate(self):
+        """Autentica contra la API y obtiene un token de sesión.
+
+        Realiza una solicitud POST al endpoint /login de la API con las credenciales
+        proporcionadas. Almacena el token JWT recibido para usarlo en solicitudes futuras.
+
+        Raises:
+            ValueError: Si la autenticación falla debido a credenciales inválidas o error del servidor.
+        """
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/login",
+                json={"username": self.username, "password": self.password}
+            )
+            response.raise_for_status()
+            data = response.json()
+            self.token = data["access_token"]
+            logger.info("Autenticación exitosa, token obtenido")
+        except Exception as e:
+            logger.error(f"Fallo en autenticación: {str(e)}")
+            raise ValueError(f"No se pudo autenticar: {str(e)}")
+
+    async def get(self, endpoint: str, params: Optional[Dict] = None) -> httpx.Response:
+        """Realiza una solicitud GET autenticada a la API.
+
+        Usa el token almacenado para autenticar la solicitud. Si el token no existe,
+        realiza la autenticación primero. Si recibe un error 401, reautentica y reintenta.
+
+        Args:
+            endpoint (str): Endpoint de la API (e.g., "/machines/").
+            params (Optional[Dict]): Parámetros de consulta para la solicitud.
+
+        Returns:
+            httpx.Response: Respuesta de la API.
+
+        Raises:
+            Exception: Si la solicitud falla después de reintentar la autenticación.
+        """
+        if not self.token:
+            await self.authenticate()
+        
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            response = await self.client.get(
+                f"{self.base_url}{endpoint}",
+                headers=headers,
+                params=params
+            )
+            if response.status_code == 401:  # Token expirado o inválido
+                logger.info("Token inválido, reautenticando...")
+                await self.authenticate()
+                headers = {"Authorization": f"Bearer {self.token}"}
+                response = await self.client.get(
+                    f"{self.base_url}{endpoint}",
+                    headers=headers,
+                    params=params
+                )
+            return response
+        except Exception as e:
+            logger.error(f"Error en solicitud GET: {str(e)}")
+            raise
+
+    async def close(self):
+        """Cierra el cliente HTTP."""
+        await self.client.aclose()
+
+# Cliente global
+auth_client = None
+
+def init_infrastructure():
+    """Inicializa la infraestructura del MCP, incluyendo Qdrant, MinIO y el cliente autenticado.
+
+    Configura las colecciones en Qdrant para almacenar logs y PDFs, crea el bucket en MinIO
+    si no existe, e inicializa el cliente autenticado para la API.
+
+    Raises:
+        Exception: Si falla la inicialización de algún componente.
+    """
+    global auth_client
+    try:
+        # Qdrant configuration
+        vector_config = models.VectorParams(size=384, distance=models.Distance.COSINE)
+        qdrant_client.recreate_collection(collection_name="mes_logs", vectors_config=vector_config)
+        qdrant_client.recreate_collection(collection_name="sop_pdfs", vectors_config=vector_config)
+        
+        # MinIO configuration
+        if not minio_client.bucket_exists(MINIO_BUCKET):
+            minio_client.make_bucket(MINIO_BUCKET)
+        
+        # Inicializar cliente autenticado
+        auth_client = AuthClient(API_URL, API_USERNAME, API_PASSWORD)
+        
+    except Exception as e:
+        logger.error(f"Infrastructure initialization failed: {str(e)}")
+        raise
+
 class TimeFilter(BaseModel):
-    """Filter for date ranges in MES data queries."""
+    """Filtro para rangos de fechas en consultas de datos MES."""
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     specific_date: Optional[str] = None
 
     def validate_dates(self):
-        """Validates date formats and logical consistency."""
+        """Valida los formatos de fecha y la consistencia lógica.
+
+        Asegura que las fechas estén en formato YYYY-MM-DD y que start_date no sea posterior
+        a end_date.
+
+        Raises:
+            ValueError: Si las fechas son inválidas o inconsistentes.
+        """
         try:
             if self.specific_date:
                 datetime.strptime(self.specific_date, "%Y-%m-%d")
@@ -59,40 +173,23 @@ class TimeFilter(BaseModel):
         except ValueError as e:
             raise ValueError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}")
 
-def init_infrastructure():
-    """Initializes required infrastructure (Qdrant collections and MinIO bucket)."""
-    try:
-        # Qdrant configuration
-        vector_config = models.VectorParams(size=384, distance=models.Distance.COSINE)
-        qdrant_client.recreate_collection(collection_name="mes_logs", vectors_config=vector_config)
-        qdrant_client.recreate_collection(collection_name="sop_pdfs", vectors_config=vector_config)
-        
-        # MinIO configuration
-        if not minio_client.bucket_exists(MINIO_BUCKET):
-            minio_client.make_bucket(MINIO_BUCKET)
-            
-    except Exception as e:
-        logger.error(f"Infrastructure initialization failed: {str(e)}")
-        raise
-
 class DataValidator:
-    """Validates key_figures and key_values against API data structure."""
+    """Valida key_figures y key_values contra la estructura de datos de la API."""
     
     @staticmethod
     async def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict[str, str]) -> Dict:
-        """
-        Validates that requested fields exist in the API data structure.
-        
+        """Valida que los campos solicitados sean válidos según la estructura de la API.
+
         Args:
-            ctx: MCP context
-            key_figures: List of numerical fields to validate
-            key_values: Dictionary of categorical filters to validate
-            
+            ctx (Context): Contexto de la solicitud FastMCP.
+            key_figures (List[str]): Lista de campos numéricos a validar.
+            key_values (Dict[str, str]): Diccionario de campos categóricos y sus valores.
+
         Returns:
-            Dictionary with field information from API
-            
+            Dict: Información de campos válidos obtenida de list_fields.
+
         Raises:
-            ValueError: If any field or value is invalid
+            ValueError: Si los campos no son válidos o si list_fields falla.
         """
         fields_info = json.loads(await list_fields(ctx))
         if fields_info["status"] != "success":
@@ -133,10 +230,9 @@ async def list_fields(ctx: Context) -> str:
         }
     """
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{API_URL}/machines/")
-            response.raise_for_status()
-            records = response.json()
+        response = await auth_client.get("/machines/")
+        response.raise_for_status()
+        records = response.json()
 
         if not records:
             return json.dumps({
@@ -228,13 +324,12 @@ async def fetch_mes_data(
             })
 
         # Determine API endpoint
-        endpoint = f"{API_URL}/machines/{key_values['machine']}" if "machine" in key_values else f"{API_URL}/machines/"
+        endpoint = f"/machines/{key_values['machine']}" if "machine" in key_values else "/machines/"
 
         # Fetch data
-        async with httpx.AsyncClient() as client:
-            response = await client.get(endpoint, params=params)
-            response.raise_for_status()
-            data = response.json()
+        response = await auth_client.get(endpoint, params=params)
+        response.raise_for_status()
+        data = response.json()
 
         # Filter and process records
         processed_data = []

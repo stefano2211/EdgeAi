@@ -6,6 +6,8 @@ services:
     container_name: api
     ports:
       - "5000:5000"
+    environment:
+      - JWT_SECRET_KEY=your-secret-key
     volumes:
       - db_data:/app
     networks:
@@ -23,6 +25,9 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=sop-pdfs
+      - API_URL=http://api:5000
+      - API_USERNAME=admin
+      - API_PASSWORD=password123
     depends_on:
       api:
         condition: service_started
@@ -82,8 +87,8 @@ services:
     image: minio/minio:latest
     container_name: minio
     ports:
-      - "9000:9000"  # Puerto API
-      - "9001:9001"  # Puerto consola
+      - "9000:9000"
+      - "9001:9001"
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
