@@ -404,7 +404,7 @@ async def analyze_compliance(
     
     Args:
         ctx: MCP context
-        key_values: Dictionary of categorical filters (e.g., {"machine": "CNC-1"})
+        key_values: Dictionary of categorical filters (e.g., {"machine": "ModelC"}, {"production_line": "Line1"} , {"material": "Steel"})
         key_figures: List of numerical metrics to analyze (e.g., ["uptime", "temperature"])
         time_filter: Date range filter (e.g., {"start_date": "2025-01-01", "end_date": "2025-01-31"})
     
