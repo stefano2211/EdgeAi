@@ -145,60 +145,63 @@ def init_infrastructure():
         logger.error(f"Infrastructure initialization failed: {str(e)}")
         raise
 
-class TimeFilter(BaseModel):
-    """Filtro para rangos de fechas en consultas de datos MES."""
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    specific_date: Optional[str] = None
-
-    def validate_dates(self):
-        """Valida los formatos de fecha y la consistencia lógica.
-
-        Asegura que las fechas estén en formato YYYY-MM-DD y que start_date no sea posterior
-        a end_date.
-
-        Raises:
-            ValueError: Si las fechas son inválidas o inconsistentes.
-        """
-        try:
-            if self.specific_date:
-                datetime.strptime(self.specific_date, "%Y-%m-%d")
-            else:
-                if self.start_date:
-                    datetime.strptime(self.start_date, "%Y-%m-%d")
-                if self.end_date:
-                    datetime.strptime(self.end_date, "%Y-%m-%d")
-                if self.start_date and self.end_date and self.start_date > self.end_date:
-                    raise ValueError("Start date cannot be after end date")
-        except ValueError as e:
-            raise ValueError(f"Invalid date format. Use YYYY-MM-DD: {str(e)}")
-
 class DataValidator:
     """Valida key_figures y key_values contra la estructura de datos de la API."""
     
     @staticmethod
+    def validate_date(date_str: str, field: str) -> None:
+        """Valida que una fecha tenga el formato YYYY-MM-DD.
+
+        Args:
+            date_str (str): Cadena de fecha a validar.
+            field (str): Nombre del campo (para mensajes de error).
+
+        Raises:
+            ValueError: Si la fecha no tiene el formato correcto.
+        """
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"Invalid format for {field}. Use YYYY-MM-DD: {date_str}")
+
+    @staticmethod
     async def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict[str, str]) -> Dict:
         """Valida que los campos solicitados sean válidos según la estructura de la API.
+
+        También valida las fechas (start_date y end_date) si están presentes en key_values,
+        asegurando que tengan el formato correcto y que start_date no sea posterior a end_date.
 
         Args:
             ctx (Context): Contexto de la solicitud FastMCP.
             key_figures (List[str]): Lista de campos numéricos a validar.
-            key_values (Dict[str, str]): Diccionario de campos categóricos y sus valores.
+            key_values (Dict[str, str]): Diccionario de campos categóricos y sus valores,
+                incluyendo fechas (start_date, end_date).
 
         Returns:
             Dict: Información de campos válidos obtenida de list_fields.
 
         Raises:
-            ValueError: Si los campos no son válidos o si list_fields falla.
+            ValueError: Si los campos o fechas no son válidos o si list_fields falla.
         """
         fields_info = json.loads(await list_fields(ctx))
         if fields_info["status"] != "success":
             raise ValueError("Could not validate fields against API")
-            
+
+        # Validar fechas en key_values
+        if "start_date" in key_values or "end_date" in key_values:
+            if "start_date" not in key_values or "end_date" not in key_values:
+                raise ValueError("Both start_date and end_date must be provided")
+            DataValidator.validate_date(key_values["start_date"], "start_date")
+            DataValidator.validate_date(key_values["end_date"], "end_date")
+            if key_values["start_date"] > key_values["end_date"]:
+                raise ValueError("start_date cannot be after end_date")
+
+        # Validar otros key_values y key_figures
         invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
         invalid_values = {
-            k: v for k, v in key_values.items() 
-            if k not in fields_info["key_values"] or v not in fields_info["key_values"].get(k, [])
+            k: v for k, v in key_values.items()
+            if k not in fields_info["key_values"] and k not in ["start_date", "end_date"]
+            or (k in fields_info["key_values"] and v not in fields_info["key_values"].get(k, []))
         }
         
         if invalid_figures or invalid_values:
@@ -213,21 +216,36 @@ class DataValidator:
 
 @mcp.tool()
 async def list_fields(ctx: Context) -> str:
-    """
-    Lists all available fields and their unique values from the MES data.
-    
+    """Lista los campos disponibles en los datos de la API MES.
+
+    Esta herramienta consulta la API para obtener una muestra de registros y clasifica
+    los campos en dos categorías:
+    - key_figures: Campos numéricos (int o float) que pueden usarse para métricas.
+    - key_values: Campos categóricos (strings) con sus valores únicos.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP, usado para autenticación y logging.
+
     Returns:
-        JSON string with structure:
-        {
-            "status": "success"|"error"|"no_data",
-            "key_figures": [str],  # List of numerical fields
-            "key_values": {         # Dictionary of categorical fields
-                "field1": [values], 
-                "field2": [values],
-                ...
-            },
-            "message": str  # Optional error message
-        }
+        str: Cadena JSON con el estado, key_figures, key_values, y mensaje de error si aplica.
+            Ejemplo:
+            {
+                "status": "success",
+                "key_figures": ["uptime", "defects", "temperature"],
+                "key_values": {
+                    "machine": ["ModelA", "ModelB"],
+                    "material": ["Steel", "Aluminum"],
+                    "date": ["2025-04-09", "2025-04-10"]
+                }
+            }
+
+    Raises:
+        Exception: Si falla la solicitud a la API o el procesamiento de los datos.
+                  Devuelve un JSON con status="error" y el mensaje de error.
+
+    Ejemplo de uso:
+        await list_fields(ctx)
+        # Retorna JSON con los campos disponibles para filtrar y analizar.
     """
     try:
         response = await auth_client.get("/machines/")
@@ -274,57 +292,69 @@ async def list_fields(ctx: Context) -> str:
 async def fetch_mes_data(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
-    key_figures: Optional[List[str]] = None,
-    time_filter: Optional[Dict[str, str]] = None
+    key_figures: Optional[List[str]] = None
 ) -> str:
-    """
-    Retrieves manufacturing data from MES system with flexible filtering.
-    
+    """Obtiene datos de la API MES, filtra dinámicamente y almacena en la base de datos vectorial.
+
+    Esta herramienta realiza las siguientes acciones:
+    1. Valida los campos solicitados (key_figures y key_values) contra la estructura de la API.
+    2. Construye parámetros de consulta basados en key_values, incluyendo fechas (start_date, end_date).
+    3. Consulta la API para obtener datos, filtrando por máquina si se especifica en key_values.
+    4. Procesa los datos para incluir solo los campos solicitados.
+    5. Almacena los datos procesados en Qdrant con embeddings generados por el modelo.
+
     Args:
-        ctx: MCP context
-        key_values: Dictionary of categorical filters (e.g., {"machine": "CNC-1"})
-        key_figures: List of numerical metrics to retrieve (e.g., ["uptime", "temperature"])
-        time_filter: Date range filter (e.g., {"start_date": "2025-01-01", "end_date": "2025-01-31"})
-    
+        ctx (Context): Contexto de la solicitud FastMCP.
+        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
+            para filtrar (example, {"machine": "ModelA", "material": "Steel", "start_date": "2025-04-09",
+            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
+        key_figures (Optional[List[str]]): Lista de campos numéricos a incluir
+            (example, ["uptime", "temperature"]).
+
     Returns:
-        JSON string with structure:
-        {
-            "status": "success"|"error",
-            "count": int,  # Number of records returned
-            "data": [      # List of records
-                {
-                    "id": str,
-                    "date": str,
-                    "machine": str,
-                    ...  # Other requested fields
-                },
-                ...
-            ],
-            "message": str  # Optional error message
-        }
+        str: Cadena JSON con el estado, conteo de registros, datos procesados, y mensaje de error si aplica.
+            Ejemplo:
+            {
+                "status": "success",
+                "count": 5,
+                "data": [
+                    {"id": 1, "date": "2025-04-10", "machine": "ModelA", "temperature": 75.0},
+                    ...
+                ]
+            }
+
+    Raises:
+        Exception: Si falla la validación, la solicitud a la API, o el almacenamiento en Qdrant.
+                  Devuelve un JSON con status="error" y el mensaje de error.
+
+    Ejemplo de uso:
+        await fetch_mes_data(
+            ctx,
+            key_values={"machine": "ModelA", "start_date": "2025-04-09", "end_date": "2025-04-11"},
+            key_figures=["temperature"]
+        )
+        # Retorna datos filtrados para ModelA entre las fechas especificadas.
     """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
         
-        # Validate requested fields
+        # Validate requested fields and dates
         await DataValidator.validate_fields(ctx, key_figures, key_values)
         
         # Build query parameters
         params = {}
-        if time_filter:
-            tf = TimeFilter(**time_filter)
-            tf.validate_dates()
+        if "start_date" in key_values and "end_date" in key_values:
             params.update({
-                k: v for k, v in {
-                    "specific_date": tf.specific_date,
-                    "start_date": tf.start_date,
-                    "end_date": tf.end_date
-                }.items() if v is not None
+                "start_date": key_values["start_date"],
+                "end_date": key_values["end_date"]
             })
 
+        # Filter out date-related keys for data filtering
+        data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
+
         # Determine API endpoint
-        endpoint = f"/machines/{key_values['machine']}" if "machine" in key_values else "/machines/"
+        endpoint = f"/machines/{data_filters['machine']}" if "machine" in data_filters else "/machines/"
 
         # Fetch data
         response = await auth_client.get(endpoint, params=params)
@@ -334,7 +364,7 @@ async def fetch_mes_data(
         # Filter and process records
         processed_data = []
         for record in data:
-            if all(record.get(k) == v for k, v in key_values.items() if k != "machine"):
+            if all(record.get(k) == v for k, v in data_filters.items() if k != "machine"):
                 item = {
                     "id": record["id"],
                     "date": record["date"],
@@ -371,29 +401,38 @@ async def fetch_mes_data(
 
 @mcp.tool()
 async def load_sop(ctx: Context, machine: str) -> str:
-    """
-    Loads and processes Standard Operating Procedures (SOP) for a specific machine.
-    
+    """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO.
+
+    Esta herramienta realiza las siguientes acciones:
+    1. Verifica si el SOP ya está almacenado en Qdrant.
+    2. Si no existe, carga el PDF desde MinIO (nombre: <machine>.pdf).
+    3. Extrae el texto del PDF usando pdfplumber.
+    4. Identifica reglas de cumplimiento usando expresiones regulares.
+    5. Almacena el SOP y sus reglas en Qdrant con un embedding del texto.
+
     Args:
-        ctx: MCP context
-        machine: Machine identifier (e.g., "CNC-1")
-    
+        ctx (Context): Contexto de la solicitud FastMCP.
+        machine (str): Nombre de la máquina para la cual cargar el SOP (e.g., "ModelA").
+
     Returns:
-        JSON string with structure:
-        {
-            "status": "success"|"exists"|"error",
-            "machine": str,
-            "rules": {       # Extracted compliance rules
-                "metric1": {
-                    "value": float,
-                    "operator": ">="|"<=",
-                    "unit": str,
-                    "source_text": str
-                },
-                ...
-            },
-            "message": str  # Optional error message
-        }
+        str: Cadena JSON con el estado, máquina, reglas extraídas, y mensaje de error si aplica.
+            Ejemplo:
+            {
+                "status": "success",
+                "machine": "ModelA",
+                "rules": {
+                    "uptime": {"value": 95.0, "operator": ">=", "unit": "%", "source_text": "uptime >= 95.0%"},
+                    "temperature": {"value": 80.0, "operator": "<=", "unit": "°C", "source_text": "temperature <= 80.0°C"}
+                }
+            }
+
+    Raises:
+        Exception: Si falla la carga del PDF, la extracción de reglas, o el almacenamiento en Qdrant.
+                  Devuelve un JSON con status="error" y el mensaje de error.
+
+    Ejemplo de uso:
+        await load_sop(ctx, machine="ModelA")
+        # Carga el SOP para ModelA y retorna las reglas extraídas.
     """
     try:
         # Check if SOP already exists
@@ -491,57 +530,80 @@ async def load_sop(ctx: Context, machine: str) -> str:
 async def analyze_compliance(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
-    key_figures: Optional[List[str]] = None,
-    time_filter: Optional[Dict[str, str]] = None
+    key_figures: Optional[List[str]] = None
 ) -> str:
-    """
-    Analyzes manufacturing data compliance against SOP standards.
-    
+    """Analiza el cumplimiento de los datos MES contra las reglas SOP.
+
+    Esta herramienta realiza las siguientes acciones:
+    1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
+    2. Obtiene datos de la API MES usando fetch_mes_data, aplicando filtros dinámicos.
+    3. Carga las reglas SOP para las máquinas relevantes usando load_sop.
+    4. Compara cada registro contra las reglas SOP, determinando el estado de cumplimiento.
+    5. Calcula un porcentaje de cumplimiento por registro.
+    6. Devuelve un informe detallado con los resultados del análisis.
+
     Args:
-        ctx: MCP context
-        key_values: Dictionary of categorical filters (e.g., {"machine": "ModelC"}, {"production_line": "Line1"} , {"material": "Steel"})
-        key_figures: List of numerical metrics to analyze (e.g., ["uptime", "temperature"])
-        time_filter: Date range filter (e.g., {"start_date": "2025-01-01", "end_date": "2025-01-31"})
-    
+        ctx (Context): Contexto de la solicitud FastMCP.
+        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
+            para filtrar (example, {"machine": "ModelA", "material": "Steel", "production_line":"Line1", "start_date": "2025-04-09",
+            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
+        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
+            (example, ["temperature", "uptime"]).
+
     Returns:
-        JSON string with structure:
-        {
-            "status": "success"|"error",
-            "period": str,  # Analyzed time period
-            "machine_filter": str,  # Machine filter applied
-            "metrics_analyzed": [str],  # List of analyzed metrics
-            "results": [     # Compliance analysis results
-                {
-                    "id": str,
-                    "date": str,
-                    "machine": str,
-                    "metrics": {str: float},  # Metric values
-                    "compliance": {   # Compliance status per metric
-                        "metric1": {
-                            "value": float,
-                            "rule": str,
-                            "status": "compliant"|"non_compliant"|"unknown"
+        str: Cadena JSON con el estado, período, filtro de máquina, métricas analizadas,
+            resultados del análisis, cobertura de SOP, y notas.
+            Ejemplo:
+            {
+                "status": "success",
+                "period": "2025-04-09 to 2025-04-11",
+                "machine_filter": "ModelA",
+                "metrics_analyzed": ["temperature"],
+                "results": [
+                    {
+                        "id": 1,
+                        "date": "2025-04-10",
+                        "machine": "ModelA",
+                        "metrics": {"temperature": 75.0},
+                        "compliance": {
+                            "temperature": {
+                                "value": 75.0,
+                                "rule": "<= 80.0°C",
+                                "status": "compliant"
+                            }
                         },
-                        ...
-                    },
-                    "compliance_percentage": float  # Overall compliance percentage
-                },
-                ...
-            ],
-            "sop_coverage": str,  # SOP coverage statistics
-            "analysis_notes": [str],  # Interpretation guidelines
-            "message": str  # Optional error message
-        }
+                        "compliance_percentage": 100.0
+                    }
+                ],
+                "sop_coverage": "1/1 machines with SOP",
+                "analysis_notes": [
+                    "compliant: Meets SOP requirement",
+                    "non_compliant: Does not meet SOP requirement",
+                    "unknown: No SOP rule defined"
+                ]
+            }
+
+    Raises:
+        Exception: Si falla la validación, la obtención de datos, o el análisis.
+                  Devuelve un JSON con status="error" y el mensaje de error.
+
+    Ejemplo de uso:
+        await analyze_compliance(
+            ctx,
+            key_values={"machine": "ModelA", "start_date": "2025-04-09", "end_date": "2025-04-11"},
+            key_figures=["temperature"]
+        )
+        # Analiza el cumplimiento de los datos de ModelA para el rango de fechas especificado.
     """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
         
-        # Validate requested fields
+        # Validate requested fields and dates
         fields_info = await DataValidator.validate_fields(ctx, key_figures, key_values)
         
         # Fetch manufacturing data
-        fetch_result = json.loads(await fetch_mes_data(ctx, key_values, key_figures, time_filter))
+        fetch_result = json.loads(await fetch_mes_data(ctx, key_values, key_figures))
         if fetch_result["status"] != "success":
             return json.dumps({
                 "status": "error",
@@ -604,10 +666,8 @@ async def analyze_compliance(
 
         # Format time period description
         period = "all dates"
-        if time_filter:
-            tf = TimeFilter(**time_filter)
-            tf.validate_dates()
-            period = tf.specific_date or f"{tf.start_date} to {tf.end_date}"
+        if "start_date" in key_values and "end_date" in key_values:
+            period = f"{key_values['start_date']} to {key_values['end_date']}"
 
         return json.dumps({
             "status": "success",
