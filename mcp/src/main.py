@@ -1,9 +1,8 @@
 import httpx
 from mcp.server.fastmcp import FastMCP, Context
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 import logging
-from pydantic import BaseModel
 import re
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
@@ -39,6 +38,10 @@ minio_client = Minio(MINIO_ENDPOINT,
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# In-memory caches
+sop_cache = {}
+expert_rules_cache = {}
 
 class AuthClient:
     """Cliente HTTP para manejar autenticación y solicitudes autenticadas a la API."""
@@ -97,7 +100,7 @@ class AuthClient:
                 headers=headers,
                 params=params
             )
-            if response.status_code == 401:  # Token expirado o inválido
+            if response.status_code == 401:
                 logger.info("Token inválido, reautenticando...")
                 await self.authenticate()
                 headers = {"Authorization": f"Bearer {self.token}"}
@@ -121,7 +124,7 @@ auth_client = None
 def init_infrastructure():
     """Inicializa la infraestructura del MCP, incluyendo Qdrant, MinIO y el cliente autenticado.
 
-    Configura las colecciones en Qdrant para almacenar logs y PDFs, crea el bucket en MinIO
+    Configura las colecciones en Qdrant para almacenar logs, PDFs y reglas expertas, crea el bucket en MinIO
     si no existe, e inicializa el cliente autenticado para la API.
 
     Raises:
@@ -133,6 +136,7 @@ def init_infrastructure():
         vector_config = models.VectorParams(size=384, distance=models.Distance.COSINE)
         qdrant_client.recreate_collection(collection_name="mes_logs", vectors_config=vector_config)
         qdrant_client.recreate_collection(collection_name="sop_pdfs", vectors_config=vector_config)
+        qdrant_client.recreate_collection(collection_name="expert_rules", vectors_config=vector_config)
         
         # MinIO configuration
         if not minio_client.bucket_exists(MINIO_BUCKET):
@@ -269,9 +273,11 @@ async def list_fields(ctx: Context) -> str:
                 continue
             if isinstance(value, (int, float)):
                 key_figures.append(field)
+                logger.info(f"Detectado key_figure: {field}")
             elif isinstance(value, str):
                 unique_values = sorted({rec[field] for rec in records if field in rec})
                 key_values[field] = unique_values
+                logger.info(f"Detectado key_value: {field} con valores {unique_values}")
 
         return json.dumps({
             "status": "success",
@@ -298,18 +304,19 @@ async def fetch_mes_data(
 
     Esta herramienta realiza las siguientes acciones:
     1. Valida los campos solicitados (key_figures y key_values) contra la estructura de la API.
-    2. Construye parámetros de consulta basados en key_values, incluyendo fechas (start_date, end_date).
-    3. Consulta la API para obtener datos, filtrando por máquina si se especifica en key_values.
-    4. Procesa los datos para incluir solo los campos solicitados.
-    5. Almacena los datos procesados en Qdrant con embeddings generados por el modelo.
+    2. Verifica si los datos ya están en Qdrant para los filtros especificados.
+    3. Si no están en Qdrant, construye parámetros de consulta basados en key_values, incluyendo fechas.
+    4. Consulta la API para obtener datos, filtrando por máquina si se especifica en key_values.
+    5. Procesa los datos para incluir solo los campos solicitados.
+    6. Almacena los datos procesados en Qdrant con embeddings generados por el modelo.
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (example, {"machine": "ModelA", "material": "Steel", "start_date": "2025-04-09",
+            para filtrar (e.g., {"machine": "ModelA", "material": "Steel", "start_date": "2025-04-09",
             "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
         key_figures (Optional[List[str]]): Lista de campos numéricos a incluir
-            (example, ["uptime", "temperature"]).
+            (e.g., ["uptime", "temperature"]).
 
     Returns:
         str: Cadena JSON con el estado, conteo de registros, datos procesados, y mensaje de error si aplica.
@@ -342,7 +349,50 @@ async def fetch_mes_data(
         # Validate requested fields and dates
         await DataValidator.validate_fields(ctx, key_figures, key_values)
         
-        # Build query parameters
+        # Generate a unique hash for the query
+        query_hash = hashlib.md5(json.dumps({"key_values": key_values, "key_figures": key_figures}, sort_keys=True).encode()).hexdigest()
+        logger.info(f"Procesando consulta con query_hash: {query_hash}")
+        
+        # Check Qdrant for existing data
+        filter_conditions = []
+        for k, v in key_values.items():
+            if k not in ["start_date", "end_date"]:
+                filter_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
+        
+        # Handle date range filtering
+        date_filters = []
+        if "start_date" in key_values and "end_date" in key_values:
+            start_date = datetime.strptime(key_values["start_date"], "%Y-%m-%d")
+            end_date = datetime.strptime(key_values["end_date"], "%Y-%m-%d")
+            current_date = start_date
+            while current_date <= end_date:
+                date_filters.append(models.FieldCondition(
+                    key="date",
+                    match=models.MatchValue(value=current_date.strftime("%Y-%m-%d"))
+                ))
+                current_date += timedelta(days=1)
+        
+        if date_filters:
+            filter_conditions.append(models.Filter(should=date_filters))
+        
+        existing = qdrant_client.scroll(
+            collection_name="mes_logs",
+            scroll_filter=models.Filter(must=filter_conditions),
+            limit=1000
+        )[0]
+        
+        if existing:
+            processed_data = [point.payload for point in existing if all(f in point.payload for f in key_figures)]
+            if processed_data:
+                logger.info(f"Datos recuperados de Qdrant para query_hash: {query_hash}")
+                return json.dumps({
+                    "status": "success",
+                    "count": len(processed_data),
+                    "data": processed_data,
+                    "source": "qdrant_cache"
+                }, ensure_ascii=False)
+
+        # Build query parameters for API
         params = {}
         if "start_date" in key_values and "end_date" in key_values:
             params.update({
@@ -356,7 +406,7 @@ async def fetch_mes_data(
         # Determine API endpoint
         endpoint = f"/machines/{data_filters['machine']}" if "machine" in data_filters else "/machines/"
 
-        # Fetch data
+        # Fetch data from API
         response = await auth_client.get(endpoint, params=params)
         response.raise_for_status()
         data = response.json()
@@ -383,11 +433,13 @@ async def fetch_mes_data(
                 ) for r in processed_data
             ]
             qdrant_client.upsert(collection_name="mes_logs", points=points)
+            logger.info(f"Datos almacenados en Qdrant para query_hash: {query_hash}")
 
         return json.dumps({
             "status": "success",
             "count": len(processed_data),
-            "data": processed_data
+            "data": processed_data,
+            "source": "api"
         }, ensure_ascii=False)
 
     except Exception as e:
@@ -404,11 +456,11 @@ async def load_sop(ctx: Context, machine: str) -> str:
     """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO.
 
     Esta herramienta realiza las siguientes acciones:
-    1. Verifica si el SOP ya está almacenado en Qdrant.
-    2. Si no existe, carga el PDF desde MinIO (nombre: <machine>.pdf).
+    1. Verifica si las reglas SOP están en caché o Qdrant.
+    2. Si no existen, carga el PDF desde MinIO (nombre: <machine>.pdf).
     3. Extrae el texto del PDF usando pdfplumber.
-    4. Identifica reglas de cumplimiento usando expresiones regulares.
-    5. Almacena el SOP y sus reglas en Qdrant con un embedding del texto.
+    4. Identifica reglas de cumplimiento usando patrones dinámicos para cualquier campo numérico.
+    5. Almacena el SOP y sus reglas en Qdrant y caché con un embedding del texto.
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
@@ -435,18 +487,30 @@ async def load_sop(ctx: Context, machine: str) -> str:
         # Carga el SOP para ModelA y retorna las reglas extraídas.
     """
     try:
-        # Check if SOP already exists
+        # Check in-memory cache
+        if machine in sop_cache:
+            logger.info(f"SOP recuperado de caché para máquina: {machine}")
+            return json.dumps({
+                "status": "cached",
+                "machine": machine,
+                "rules": sop_cache[machine]
+            }, ensure_ascii=False)
+
+        # Check Qdrant
         existing = qdrant_client.scroll(
             collection_name="sop_pdfs",
             scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
             limit=1
-        )
+        )[0]
         
-        if existing[0]:
+        if existing:
+            rules = existing[0].payload["rules"]
+            sop_cache[machine] = rules
+            logger.info(f"SOP recuperado de Qdrant para máquina: {machine}")
             return json.dumps({
                 "status": "exists",
                 "machine": machine,
-                "rules": existing[0][0].payload["rules"]
+                "rules": rules
             }, ensure_ascii=False)
 
         # Load PDF from MinIO
@@ -468,26 +532,33 @@ async def load_sop(ctx: Context, machine: str) -> str:
         with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
             content = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-        # Extract compliance rules using flexible patterns
+        # Extract compliance rules using dynamic patterns
         rules = {}
+        generic_pattern = r"(?P<field>[a-zA-Z_]+)\s*(?P<operator>>=|≤|>=|<=)\s*(?P<value>\d+\.?\d*)\s*(?P<unit>[%°Cmm/s]?)"
         patterns = [
+            (generic_pattern, None, None),
             (r"(?P<field>uptime|tiempo de actividad)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*%", ">=", "%"),
             (r"(?P<field>temperature|temperatura)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*°C", "<=", "°C"),
             (r"(?P<field>vibration|vibración)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*mm/s", "<=", "mm/s"),
             (r"(?P<field>defects|defectos)\s*(?P<operator><=|≤)\s*(?P<value>\d+)", "<=", "")
         ]
 
-        for pattern, default_op, unit in patterns:
+        for pattern, default_op, default_unit in patterns:
             for match in re.finditer(pattern, content, re.IGNORECASE):
                 try:
                     field = match.group("field").lower().replace(" ", "_")
+                    operator = match.group("operator") if match.group("operator") else default_op
+                    value = float(match.group("value"))
+                    unit = match.group("unit") if "unit" in match.groupdict() else default_unit or ""
                     rules[field] = {
-                        "value": float(match.group("value")),
-                        "operator": match.group("operator") if match.group("operator") else default_op,
+                        "value": value,
+                        "operator": operator,
                         "unit": unit,
                         "source_text": match.group(0)
                     }
-                except Exception:
+                    logger.info(f"Regla extraída para {field}: {rules[field]}")
+                except Exception as e:
+                    logger.warning(f"Fallo al procesar regla: {match.group(0)}, error: {str(e)}")
                     continue
 
         if not rules:
@@ -512,6 +583,10 @@ async def load_sop(ctx: Context, machine: str) -> str:
             )]
         )
 
+        # Store in cache
+        sop_cache[machine] = rules
+        logger.info(f"SOP procesado y almacenado para máquina: {machine}")
+
         return json.dumps({
             "status": "success",
             "machine": machine,
@@ -527,32 +602,301 @@ async def load_sop(ctx: Context, machine: str) -> str:
         }, ensure_ascii=False)
 
 @mcp.tool()
+async def create_expert_rule(
+    ctx: Context, 
+    prompt: str, 
+    key_figure: Optional[str] = None, 
+    machine: Optional[str] = None, 
+    operator: Optional[str] = None, 
+    threshold: Optional[float] = None, 
+    unit: Optional[str] = None
+) -> str:
+    """Crea y almacena una regla experta basada en un prompt del usuario y parámetros opcionales en Qdrant.
+
+    Esta herramienta realiza las siguientes acciones:
+    1. Usa parámetros explícitos (key_figure, machine, operator, threshold, unit) si se proporcionan, con prioridad sobre los valores extraídos del prompt.
+    2. Parsea el prompt para extraer la máquina, campo, operador, valor, unidad y condición (si aplica) si no se proporcionan explícitamente.
+    3. Valida que el key_figure sea un campo numérico válido y que la máquina sea válida usando list_fields.
+    4. Valida que el operador sea '>=', '<=', '≥', '≤' (mapeando desde términos naturales como 'no superar').
+    5. Almacena la regla en Qdrant en la colección 'expert_rules' con un embedding del prompt.
+    6. Almacena la regla en caché para acceso rápido.
+    7. Devuelve un JSON con el estado y la regla creada.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        prompt (str): Prompt del usuario que describe la regla experta
+            (e.g., "la máquina ModelA no debe superar los ≤ 50°C en la temperatura").
+        key_figure (Optional[str]): Campo numérico para la regla (e.g., 'temperature').
+            Si no se proporciona, se extrae del prompt.
+        machine (Optional[str]): Nombre de la máquina (e.g., 'ModelA').
+            Si no se proporciona, se extrae del prompt.
+        operator (Optional[str]): Operador lógico para la regla (e.g., 'no superar', 'menos de', 'mayor a').
+            Si no se proporciona, se extrae del prompt.
+        threshold (Optional[float]): Valor límite para la regla (e.g., 50 para 50°C).
+            Si no se proporciona, se extrae del prompt.
+        unit (Optional[str]): Unidad de medida para el valor (e.g., 'grados Celsius', '%', 'mm/s').
+            Si no se proporciona, se extrae del prompt o se asigna por defecto.
+
+    Returns:
+        str: Cadena JSON con el estado, máquina, regla creada, y mensaje de error si aplica.
+            Ejemplo:
+            {
+                "status": "success",
+                "machine": "ModelA",
+                "rule": {
+                    "field": "temperature",
+                    "value": 50.0,
+                    "operator": "<=",
+                    "unit": "°C",
+                    "condition": "single",
+                    "prompt": "la máquina ModelA no debe superar los ≤ 50°C en la temperatura",
+                    "timestamp": "2025-05-19T19:40:00.123456"
+                }
+            }
+
+    Raises:
+        Exception: Si falla el parseo del prompt, la validación, o el almacenamiento en Qdrant.
+                  Devuelve un JSON con status="error" y el mensaje de error.
+
+    Ejemplo de uso:
+        await create_expert_rule(
+            ctx,
+            prompt="la máquina ModelA no debe superar los ≤ 50°C en la temperatura",
+            key_figure="temperature",
+            machine="ModelA",
+            operator="no superar",
+            threshold=50.0,
+            unit="grados Celsius"
+        )
+        # Crea y almacena una regla experta para ModelA con temperatura <= 50°C.
+    """
+    try:
+        # Get available fields
+        fields_info = json.loads(await list_fields(ctx))
+        if fields_info["status"] != "success":
+            return json.dumps({
+                "status": "error",
+                "message": "Could not validate fields against API"
+            }, ensure_ascii=False)
+
+        # Initialize rule dictionary
+        rule = {
+            "condition": "single",  # Default
+            "prompt": prompt,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        # Handle machine
+        prompt_lower = prompt.lower()
+        if machine:
+            if machine not in fields_info["key_values"].get("machine", []):
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Invalid machine: {machine}. Available machines: {fields_info['key_values'].get('machine', [])}"
+                }, ensure_ascii=False)
+            rule["machine"] = machine
+        else:
+            machine_match = re.search(r"máquina\s+([a-zA-Z0-9_-]+)", prompt_lower)
+            if not machine_match:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Machine name not found in prompt. Specify 'máquina <name>' or provide 'machine' parameter"
+                }, ensure_ascii=False)
+            rule["machine"] = machine_match.group(1)
+            if rule["machine"] not in fields_info["key_values"].get("machine", []):
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Invalid machine: {rule['machine']}. Available machines: {fields_info['key_values'].get('machine', [])}"
+                }, ensure_ascii=False)
+
+        # Handle key_figure
+        field_synonyms = {
+            "temperature": ["temperatura", "temp"],
+            "uptime": ["tiempo de actividad"],
+            "vibration": ["vibración", "vibracion"],
+            "defects": ["defectos"],
+            "throughput": ["rendimiento"],
+            "inventory_level": ["nivel de inventario"]
+        }
+        if key_figure:
+            if key_figure not in fields_info["key_figures"]:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Invalid key_figure: {key_figure}. Available key_figures: {fields_info['key_figures']}"
+                }, ensure_ascii=False)
+            rule["field"] = key_figure
+        else:
+            for field, synonyms in field_synonyms.items():
+                if field in prompt_lower or any(syn in prompt_lower for syn in synonyms):
+                    rule["field"] = field
+                    break
+            else:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Key_figure not found in prompt. Available key_figures: {fields_info['key_figures']}. Specify 'key_figure' parameter or include field in prompt"
+                }, ensure_ascii=False)
+
+        # Operator mapping
+        operator_map = {
+            "no superar": "<=",
+            "menos de": "<=",
+            "menor a": "<=",
+            "máximo": "<=",
+            "mayor a": ">=",
+            "mínimo": ">=",
+            "mayor de": ">="
+        }
+
+        # Use provided operator or extract from prompt
+        if operator:
+            operator = operator.lower()
+            if operator not in operator_map:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Invalid operator: {operator}. Valid operators: {list(operator_map.keys())}"
+                }, ensure_ascii=False)
+            rule["operator"] = operator_map[operator]
+        else:
+            for op, mapped_op in operator_map.items():
+                if op in prompt_lower:
+                    rule["operator"] = mapped_op
+                    break
+            else:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Operator not specified in prompt (e.g., 'no superar', 'mayor a')"
+                }, ensure_ascii=False)
+
+        # Use provided threshold or extract from prompt
+        if threshold is not None:
+            try:
+                rule["value"] = float(threshold)
+            except ValueError:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Invalid threshold: {threshold}. Must be a number"
+                }, ensure_ascii=False)
+        else:
+            value_match = re.search(r"(\d+\.?\d*)\s*(°[CF]|%|mm/s)?", prompt_lower)
+            if not value_match:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Value not found in prompt (e.g., '50°C', '90%')"
+                }, ensure_ascii=False)
+            rule["value"] = float(value_match.group(1))
+
+        # Use provided unit or extract from prompt
+        unit_map = {
+            "grados celsius": "°C",
+            "grados fahrenheit": "°F",
+            "porcentaje": "%",
+            "mm/s": "mm/s",
+            "%": "%",
+            "°c": "°C",
+            "°f": "°F"
+        }
+        if unit:
+            unit = unit.lower()
+            if unit in unit_map:
+                rule["unit"] = unit_map[unit]
+            else:
+                rule["unit"] = unit  # Allow custom units if valid
+        else:
+            value_match = re.search(r"(\d+\.?\d*)\s*(°[CF]|%|mm/s)?", prompt_lower)
+            rule["unit"] = value_match.group(2) if value_match and value_match.group(2) else ""
+            if not rule["unit"] and rule["field"] == "temperature":
+                rule["unit"] = "°C"  # Default for temperature
+
+        # Extract condition
+        if "ambas máquinas" in prompt_lower or "todas las máquinas" in prompt_lower:
+            rule["condition"] = "both_machines"
+
+        # Validate rule
+        if rule["field"] not in fields_info["key_figures"]:
+            return json.dumps({
+                "status": "error",
+                "message": f"Invalid field: {rule['field']}. Available fields: {fields_info['key_figures']}"
+            }, ensure_ascii=False)
+        if rule["operator"] not in [">=", "≤", "<=", "≥"]:
+            return json.dumps({
+                "status": "error",
+                "message": f"Invalid operator: {rule['operator']}. Use '>=', '<='"
+            }, ensure_ascii=False)
+
+        # Validate unit consistency
+        expected_units = {
+            "temperature": ["°C", "°F"],
+            "uptime": ["%"],
+            "vibration": ["mm/s"],
+            "defects": [""],
+            "throughput": [""],
+            "inventory_level": [""]
+        }
+        if rule["field"] in expected_units and rule["unit"] and rule["unit"] not in expected_units[rule["field"]]:
+            return json.dumps({
+                "status": "error",
+                "message": f"Invalid unit for {rule['field']}: {rule['unit']}. Expected: {expected_units[rule['field']]}"
+            }, ensure_ascii=False)
+
+        # Store in Qdrant
+        rule_id = hashlib.md5(f"{rule['machine']}{rule['field']}{rule['timestamp']}".encode()).hexdigest()
+        embedding = model.encode(prompt).tolist()
+        qdrant_client.upsert(
+            collection_name="expert_rules",
+            points=[models.PointStruct(
+                id=rule_id,
+                vector=embedding,
+                payload=rule
+            )]
+        )
+
+        # Store in cache
+        if rule["machine"] not in expert_rules_cache:
+            expert_rules_cache[rule["machine"]] = {}
+        expert_rules_cache[rule["machine"]][rule["field"]] = rule
+        logger.info(f"Regla experta creada para {rule['machine']}:{rule['field']}: {rule}")
+
+        return json.dumps({
+            "status": "success",
+            "machine": rule["machine"],
+            "rule": rule
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Expert rule creation failed: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, ensure_ascii=False)
+
+@mcp.tool()
 async def analyze_compliance(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Analiza el cumplimiento de los datos MES contra las reglas SOP.
+    """Analiza el cumplimiento de los datos MES contra reglas SOP y reglas expertas.
 
     Esta herramienta realiza las siguientes acciones:
     1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
-    2. Obtiene datos de la API MES usando fetch_mes_data, aplicando filtros dinámicos.
+    2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data, aplicando filtros dinámicos.
     3. Carga las reglas SOP para las máquinas relevantes usando load_sop.
-    4. Compara cada registro contra las reglas SOP, determinando el estado de cumplimiento.
-    5. Calcula un porcentaje de cumplimiento por registro.
-    6. Devuelve un informe detallado con los resultados del análisis.
+    4. Consulta reglas expertas en Qdrant para las máquinas relevantes.
+    5. Compara cada registro contra las reglas SOP y expertas, determinando el estado de cumplimiento.
+    6. Calcula porcentajes de cumplimiento separados para SOP y reglas expertas.
+    7. Devuelve un informe detallado con los resultados del análisis.
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (example, {"machine": "ModelA", "material": "Steel", "production_line":"Line1", "start_date": "2025-04-09",
-            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
+            para filtrar (e.g., {"machine": "ModelA", "material": "Steel", "production_line": "Line1",
+            "start_date": "2025-04-09", "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
         key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (example, ["temperature", "uptime"]).
+            (e.g., ["temperature", "uptime"]).
 
     Returns:
         str: Cadena JSON con el estado, período, filtro de máquina, métricas analizadas,
-            resultados del análisis, cobertura de SOP, y notas.
+            resultados del análisis (SOP y expertas), cobertura de SOP, y notas.
             Ejemplo:
             {
                 "status": "success",
@@ -565,21 +909,29 @@ async def analyze_compliance(
                         "date": "2025-04-10",
                         "machine": "ModelA",
                         "metrics": {"temperature": 75.0},
-                        "compliance": {
+                        "sop_compliance": {
                             "temperature": {
                                 "value": 75.0,
                                 "rule": "<= 80.0°C",
                                 "status": "compliant"
                             }
                         },
-                        "compliance_percentage": 100.0
+                        "expert_compliance": {
+                            "temperature": {
+                                "value": 75.0,
+                                "rule": "<= 50.0°C (single)",
+                                "status": "non_compliant"
+                            }
+                        },
+                        "sop_compliance_percentage": 100.0,
+                        "expert_compliance_percentage": 0.0
                     }
                 ],
                 "sop_coverage": "1/1 machines with SOP",
                 "analysis_notes": [
-                    "compliant: Meets SOP requirement",
-                    "non_compliant: Does not meet SOP requirement",
-                    "unknown: No SOP rule defined"
+                    "compliant: Meets requirement",
+                    "non_compliant: Does not meet requirement",
+                    "unknown: No rule defined"
                 ]
             }
 
@@ -593,7 +945,7 @@ async def analyze_compliance(
             key_values={"machine": "ModelA", "start_date": "2025-04-09", "end_date": "2025-04-11"},
             key_figures=["temperature"]
         )
-        # Analiza el cumplimiento de los datos de ModelA para el rango de fechas especificado.
+        # Analiza el cumplimiento de los datos de ModelA, incluyendo reglas SOP y expertas.
     """
     try:
         key_values = key_values or {}
@@ -616,7 +968,32 @@ async def analyze_compliance(
         machine_rules = {}
         for machine in machines:
             sop_result = json.loads(await load_sop(ctx, machine))
-            machine_rules[machine] = sop_result.get("rules", {}) if sop_result["status"] in ["success", "exists"] else {}
+            machine_rules[machine] = sop_result.get("rules", {}) if sop_result["status"] in ["success", "exists", "cached"] else {}
+            logger.info(f"Reglas SOP cargadas para máquina {machine}: {machine_rules[machine]}")
+
+        # Load expert rules from Qdrant or cache
+        expert_rules = {}
+        for machine in machines:
+            if machine in expert_rules_cache:
+                expert_rules[machine] = expert_rules_cache[machine]
+                logger.info(f"Reglas expertas recuperadas de caché para máquina {machine}")
+                continue
+
+            existing = qdrant_client.scroll(
+                collection_name="expert_rules",
+                scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
+                limit=100
+            )[0]
+            
+            expert_rules[machine] = {}
+            if existing:
+                # Use the most recent rule for each field
+                for point in sorted(existing, key=lambda x: x.payload["timestamp"], reverse=True):
+                    field = point.payload["field"]
+                    if field not in expert_rules[machine]:
+                        expert_rules[machine][field] = point.payload
+                expert_rules_cache[machine] = expert_rules[machine]
+                logger.info(f"Reglas expertas cargadas de Qdrant para máquina {machine}: {expert_rules[machine]}")
 
         # Analyze compliance for each record
         results = []
@@ -626,18 +1003,23 @@ async def analyze_compliance(
                 "date": record["date"],
                 "machine": record["machine"],
                 "metrics": {f: record[f] for f in key_figures if f in record},
-                "compliance": {},
-                "compliance_percentage": 0.0
+                "sop_compliance": {},
+                "expert_compliance": {},
+                "sop_compliance_percentage": 0.0,
+                "expert_compliance_percentage": 0.0
             }
             
-            compliant = 0
-            total = 0
+            sop_compliant = 0
+            sop_total = 0
+            expert_compliant = 0
+            expert_total = 0
             
             for field in key_figures:
                 if field not in record:
                     continue
-                    
-                total += 1
+                
+                # SOP compliance
+                sop_total += 1
                 rules = machine_rules.get(record["machine"], {})
                 
                 if field in rules:
@@ -645,22 +1027,57 @@ async def analyze_compliance(
                     value = record[field]
                     op = rule["operator"]
                     
-                    is_compliant = (value >= rule["value"]) if op == ">=" else (value <= rule["value"])
-                    analysis["compliance"][field] = {
+                    is_compliant = (value >= rule["value"]) if op in [">=", "≥"] else (value <= rule["value"])
+                    analysis["sop_compliance"][field] = {
                         "value": value,
                         "rule": f"{op} {rule['value']}{rule.get('unit', '')}",
                         "status": "compliant" if is_compliant else "non_compliant"
                     }
-                    compliant += 1 if is_compliant else 0
+                    sop_compliant += 1 if is_compliant else 0
                 else:
-                    analysis["compliance"][field] = {
+                    analysis["sop_compliance"][field] = {
                         "value": record[field],
                         "rule": "no_rule_defined",
                         "status": "unknown"
                     }
+
+                # Expert compliance
+                expert_rules_for_machine = expert_rules.get(record["machine"], {})
+                if field in expert_rules_for_machine:
+                    expert_total += 1
+                    rule = expert_rules_for_machine[field]
+                    value = record[field]
+                    op = rule["operator"]
+                    
+                    is_compliant = (value >= rule["value"]) if op in [">=", "≥"] else (value <= rule["value"])
+                    
+                    # Check combined condition (e.g., both machines)
+                    if rule.get("condition") == "both_machines":
+                        other_machines = [r for r in fetch_result["data"] if r["machine"] != record["machine"] and field in r]
+                        if other_machines:
+                            all_compliant = all(
+                                (r[field] >= rule["value"] if op in [">=", "≥"] else r[field] <= rule["value"])
+                                for r in other_machines
+                            )
+                            is_compliant = is_compliant and all_compliant
+                        
+                    analysis["expert_compliance"][field] = {
+                        "value": value,
+                        "rule": f"{op} {rule['value']}{rule.get('unit', '')} ({rule.get('condition', 'single')})",
+                        "status": "compliant" if is_compliant else "non_compliant"
+                    }
+                    expert_compliant += 1 if is_compliant else 0
+                else:
+                    analysis["expert_compliance"][field] = {
+                        "value": record[field],
+                        "rule": "no_expert_rule_defined",
+                        "status": "unknown"
+                    }
             
-            if total > 0:
-                analysis["compliance_percentage"] = round((compliant / total) * 100, 2)
+            if sop_total > 0:
+                analysis["sop_compliance_percentage"] = round((sop_compliant / sop_total) * 100, 2)
+            if expert_total > 0:
+                analysis["expert_compliance_percentage"] = round((expert_compliant / expert_total) * 100, 2)
             
             results.append(analysis)
 
@@ -677,9 +1094,9 @@ async def analyze_compliance(
             "results": results,
             "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP",
             "analysis_notes": [
-                "compliant: Meets SOP requirement",
-                "non_compliant: Does not meet SOP requirement",
-                "unknown: No SOP rule defined"
+                "compliant: Meets requirement",
+                "non_compliant: Does not meet requirement",
+                "unknown: No rule defined"
             ]
         }, ensure_ascii=False)
 
