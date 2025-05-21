@@ -454,7 +454,7 @@ async def load_sop(ctx: Context, machine: str) -> str:
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
-        machine (str): Nombre de la máquina para la cual cargar el SOP (e.g., "ModelA").
+        machine (str): Nombre de la máquina para la cual cargar el SOP (example, "ModelA").
 
     Returns:
         str: Cadena JSON con el estado, máquina, reglas extraídas, y mensaje de error si aplica.
@@ -614,18 +614,18 @@ async def create_expert_rule(
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
-        prompt (str): Prompt del usuario que describe la regla experta
-            (e.g., "la máquina ModelA no debe superar los ≤ 50°C en la temperatura").
-        key_figure (Optional[str]): Campo numérico para la regla (e.g., 'temperature').
-            Si no se proporciona, se extrae del prompt.
-        machine (Optional[str]): Nombre de la máquina (e.g., 'ModelA').
-            Si no se proporciona, se extrae del prompt.
-        operator (Optional[str]): Operador lógico para la regla (e.g., 'no superar', 'menos de', 'mayor a').
-            Si no se proporciona, se extrae del prompt.
-        threshold (Optional[float]): Valor límite para la regla (e.g., 50 para 50°C).
-            Si no se proporciona, se extrae del prompt.
-        unit (Optional[str]): Unidad de medida para el valor (e.g., 'grados Celsius', '%', 'mm/s').
-            Si no se proporciona, se extrae del prompt o se asigna por defecto.
+        machines (Union[List[str], str]): Lista de máquinas para las cuales aplica la regla (e.g., ["ModelA", "ModelB"])
+            o string JSON (example, '["ModelA"]'). Se parseará automáticamente si es string.
+        key_figures (Union[Dict[str, Dict[str, float]], str]): Diccionario de campos numéricos y sus valores umbral
+            (example, {"temperature": {"value": 80.0}}) o string JSON (example, '{"temperature": {"value": 80.0}}').
+            Se parseará automáticamente si es string.
+        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos para filtrar
+            (example, {"material": "Steel", "batch": "B123"}). Por defecto None.
+        operator (str): Operador de la regla, debe ser uno de: ">=", "<=", ">", "<", "==", "!=".
+            Por defecto "<=".
+        unit (Optional[str]): Unidad de medida para los key_figures (e.g., "°C"). Por defecto None.
+        description (str): Descripción de la regla (example, "Temperatura máxima por experiencia").
+            Por defecto "".
 
     Returns:
         str: Cadena JSON con el estado, máquina, regla creada, y mensaje de error si aplica.
