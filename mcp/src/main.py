@@ -553,16 +553,16 @@ async def add_custom_rule(
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         machines (Union[List[str], str]): Lista de máquinas para las cuales aplica la regla (e.g., ["ModelA", "ModelB"])
-            o string JSON (e.g., '["ModelA"]'). Se parseará automáticamente si es string.
+            o string JSON (Example, '["ModelA"]'). Se parseará automáticamente si es string.
         key_figures (Union[Dict[str, Dict[str, float]], str]): Diccionario de campos numéricos y sus valores umbral
-            (e.g., {"temperature": {"value": 80.0}}) o string JSON (e.g., '{"temperature": {"value": 80.0}}').
+            (Example, {"temperature": {"value": 80.0}}) o string JSON (Example, '{"temperature": {"value": 80.0}}').
             Se parseará automáticamente si es string.
         key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos para filtrar
-            (e.g., {"material": "Steel", "batch": "B123"}). Por defecto None.
+            (Example, {"material": "Steel", "batch": "B123"}). Por defecto None.
         operator (str): Operador de la regla, debe ser uno de: ">=", "<=", ">", "<", "==", "!=".
             Por defecto "<=".
         unit (Optional[str]): Unidad de medida para los key_figures (e.g., "°C"). Por defecto None.
-        description (str): Descripción de la regla (e.g., "Temperatura máxima por experiencia").
+        description (str): Descripción de la regla (Example., "Temperatura máxima por experiencia").
             Por defecto "".
 
     Returns:
@@ -711,10 +711,10 @@ async def analyze_compliance(
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (example, {"machine": "ModelA", "material": "Steel", "production_line":"Line1", "start_date": "2025-04-09",
+            para filtrar (Example, {"machine": "ModelA", "material": "Steel", "production_line":"Line1", "start_date": "2025-04-09",
             "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
         key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (example, ["temperature", "uptime"]).
+            (Example, ["temperature", "uptime"]).
 
     Returns:
         str: Cadena JSON con el estado, período, filtro de máquina, métricas analizadas,
