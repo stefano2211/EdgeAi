@@ -132,7 +132,6 @@ def init_infrastructure():
     """
     global auth_client
     try:
-        # Qdrant configuration
         vector_config = models.VectorParams(size=384, distance=models.Distance.COSINE)
         qdrant_client.recreate_collection(collection_name="mes_logs", vectors_config=vector_config)
         qdrant_client.recreate_collection(collection_name="sop_pdfs", vectors_config=vector_config)
@@ -141,10 +140,7 @@ def init_infrastructure():
         # MinIO configuration
         if not minio_client.bucket_exists(MINIO_BUCKET):
             minio_client.make_bucket(MINIO_BUCKET)
-        
-        # Inicializar cliente autenticado
         auth_client = AuthClient(API_URL, API_USERNAME, API_PASSWORD)
-        
     except Exception as e:
         logger.error(f"Infrastructure initialization failed: {str(e)}")
         raise
@@ -191,7 +187,6 @@ class DataValidator:
         if fields_info["status"] != "success":
             raise ValueError("Could not validate fields against API")
 
-        # Validar fechas en key_values
         if "start_date" in key_values or "end_date" in key_values:
             if "start_date" not in key_values or "end_date" not in key_values:
                 raise ValueError("Both start_date and end_date must be provided")
@@ -200,7 +195,6 @@ class DataValidator:
             if key_values["start_date"] > key_values["end_date"]:
                 raise ValueError("start_date cannot be after end_date")
 
-        # Validar otros key_values y key_figures
         invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
         invalid_values = {
             k: v for k, v in key_values.items()
@@ -300,7 +294,7 @@ async def fetch_mes_data(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Obtiene datos de la API MES, filtra dinámicamente y almacena en la base de datos vectorial.
+    """Obtiene datos de la API MES o Qdrant, filtra dinámicamente y almacena en la base de datos vectorial.
 
     Esta herramienta realiza las siguientes acciones:
     1. Valida los campos solicitados (key_figures y key_values) contra la estructura de la API.
@@ -395,33 +389,29 @@ async def fetch_mes_data(
         # Build query parameters for API
         params = {}
         if "start_date" in key_values and "end_date" in key_values:
-            params.update({
-                "start_date": key_values["start_date"],
-                "end_date": key_values["end_date"]
-            })
+            must_conditions.append(models.FieldCondition(
+                key="date",
+                match=models.MatchText(text=f"[{key_values['start_date']} TO {key_values['end_date']}]")
+            ))
+        for k, v in key_values.items():
+            if k not in ["machine", "start_date", "end_date"]:
+                must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
 
-        # Filter out date-related keys for data filtering
-        data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
+        qdrant_results = qdrant_client.scroll(
+            collection_name="mes_logs",
+            scroll_filter=models.Filter(must=must_conditions) if must_conditions else None,
+            limit=1000
+        )
 
-        # Determine API endpoint
-        endpoint = f"/machines/{data_filters['machine']}" if "machine" in data_filters else "/machines/"
+        processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
 
         # Fetch data from API
         response = await auth_client.get(endpoint, params=params)
         response.raise_for_status()
         data = response.json()
 
-        # Filter and process records
-        processed_data = []
-        for record in data:
-            if all(record.get(k) == v for k, v in data_filters.items() if k != "machine"):
-                item = {
-                    "id": record["id"],
-                    "date": record["date"],
-                    "machine": record["machine"]
-                }
-                item.update({f: record[f] for f in key_figures if f in record})
-                processed_data.append(item)
+            # Filter out date-related keys for data filtering
+            data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
 
         # Store in vector database
         if processed_data:
@@ -911,9 +901,16 @@ async def analyze_compliance(
                         "metrics": {"temperature": 75.0},
                         "sop_compliance": {
                             "temperature": {
-                                "value": 75.0,
-                                "rule": "<= 80.0°C",
-                                "status": "compliant"
+                                "sop": {"value": 75.0, "rule": "<= 80.0°C", "status": "compliant"},
+                                "custom": [
+                                    {
+                                        "value": 75.0,
+                                        "rule": "<= 78.0°C",
+                                        "status": "compliant",
+                                        "description": "Temperatura máxima por experiencia",
+                                        "filters": {"material": "Steel"}
+                                    }
+                                ]
                             }
                         },
                         "expert_compliance": {
@@ -928,6 +925,7 @@ async def analyze_compliance(
                     }
                 ],
                 "sop_coverage": "1/1 machines with SOP",
+                "custom_rules_applied": "1/1 machines with custom rules",
                 "analysis_notes": [
                     "compliant: Meets requirement",
                     "non_compliant: Does not meet requirement",
@@ -995,6 +993,17 @@ async def analyze_compliance(
                 expert_rules_cache[machine] = expert_rules[machine]
                 logger.info(f"Reglas expertas cargadas de Qdrant para máquina {machine}: {expert_rules[machine]}")
 
+        # Load custom rules from Qdrant
+        custom_rules = []
+        custom_result = qdrant_client.scroll(
+            collection_name="custom_rules",
+            scroll_filter=models.Filter(must=[
+                models.FieldCondition(key="machines", match=models.MatchAny(any=list(machines)))
+            ]),
+            limit=100
+        )
+        custom_rules = [r.payload for r in custom_result[0]] if custom_result[0] else []
+
         # Analyze compliance for each record
         results = []
         for record in fetch_result["data"]:
@@ -1022,8 +1031,10 @@ async def analyze_compliance(
                 sop_total += 1
                 rules = machine_rules.get(record["machine"], {})
                 
-                if field in rules:
-                    rule = rules[field]
+                # Check SOP rule
+                sop_rules = machine_rules.get(record["machine"], {})
+                if field in sop_rules:
+                    rule = sop_rules[field]
                     value = record[field]
                     op = rule["operator"]
                     
@@ -1093,6 +1104,7 @@ async def analyze_compliance(
             "metrics_analyzed": key_figures,
             "results": results,
             "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP",
+            "custom_rules_applied": f"{len(custom_rules)} custom rules applied",
             "analysis_notes": [
                 "compliant: Meets requirement",
                 "non_compliant: Does not meet requirement",
