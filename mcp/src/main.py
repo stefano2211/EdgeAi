@@ -411,7 +411,7 @@ async def fetch_mes_data(
         data = response.json()
 
             # Filter out date-related keys for data filtering
-            data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
+        data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
 
         # Store in vector database
         if processed_data:
