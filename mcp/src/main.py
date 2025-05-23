@@ -347,10 +347,10 @@ async def fetch_mes_data(
             "data": []
         }, ensure_ascii=False)
 
+
 @mcp.tool()
 async def load_sop(ctx: Context, machine: str) -> str:
-    """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO.
-    """
+    """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO."""
     try:
         # Check if SOP already exists in Qdrant
         existing = qdrant_client.scroll(
@@ -388,16 +388,25 @@ async def load_sop(ctx: Context, machine: str) -> str:
         # Extract compliance rules using flexible patterns
         rules = {}
         patterns = [
-            (r"(?P<field>uptime|tiempo de actividad)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*%", ">=", "%"),
-            (r"(?P<field>temperature|temperatura)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*°C", "<=", "°C"),
-            (r"(?P<field>vibration|vibración)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*mm/s", "<=", "mm/s"),
-            (r"(?P<field>defects|defectos)\s*(?P<operator><=|≤)\s*(?P<value>\d+)", "<=", "")
+            (r"(?P<field>cycle_time|ciclo)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*segundos?", "<=", "s"),
+            (r"(?P<field>error_count|errores)\s*(?P<operator><=|≤)\s*(?P<value>\d+)", "<=", ""),
+            (r"(?P<field>pressure|presión)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*bar", "<=", "bar\\[0.5mm]bar", "<=", "bar"),
+            (r"(?P<field>power_consumption|consumo)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*kW", "<=", "kW"),
+            (r"(?P<field>output_rate|producción)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*unidades/h", ">=", "units/h")
         ]
 
         for pattern, default_op, unit in patterns:
             for match in re.finditer(pattern, content, re.IGNORECASE):
                 try:
                     field = match.group("field").lower().replace(" ", "_")
+                    if field in ["ciclo", "errores", "presión", "consumo", "producción"]:
+                        field = {
+                            "ciclo": "cycle_time",
+                            "errores": "error_count",
+                            "presión": "pressure",
+                            "consumo": "power_consumption",
+                            "producción": "output_rate"
+                        }[field]
                     rules[field] = {
                         "value": float(match.group("value")),
                         "operator": match.group("operator") if match.group("operator") else default_op,
@@ -442,6 +451,8 @@ async def load_sop(ctx: Context, machine: str) -> str:
             "message": str(e),
             "machine": machine
         }, ensure_ascii=False)
+
+
 
 @mcp.tool()
 async def add_custom_rule(
@@ -812,10 +823,10 @@ async def analyze_compliance(
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Example, {"machine": "ModelA", "material": "Steel", "production_line":"Line1", "start_date": "2025-04-09",
+            para filtrar (Example, {"equipment_id": "EquipA", "operation_mode": "Auto", "product_type":"WidgetC", "status":"Running","start_date": "2025-04-09",
             "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
         key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (Example, ["temperature", "uptime"]).
+            (Example, ["pressure", "uptime"]).
 
     Returns:
         str: Cadena JSON con el estado, período, filtro de máquina, métricas analizadas,
