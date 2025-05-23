@@ -222,10 +222,16 @@ async def fetch_mes_data(
         identifier_field = None
         identifier_value = None
         for field in valid_values:
-            if field in key_values and field not in ["start_date", "end_date"]:
+            if field == "equipment_id":
                 identifier_field = field
-                identifier_value = key_values[field]
+                identifier_value = key_values.get(field)
                 break
+        if not identifier_field:
+            for field in valid_values:
+                if field not in ["start_date", "end_date", "date"]:
+                    identifier_field = field
+                    identifier_value = key_values.get(field)
+                    break
         
         # Check Qdrant for existing data
         must_conditions = []
@@ -424,23 +430,23 @@ async def add_custom_rule(
     """Añade una regla de cumplimiento personalizada para múltiples máquinas y métricas.
 
     Versión mejorada que acepta:
-    - Dict: {"temperature": 70.0, "pressure": 1.2}
-    - String: "temperature=70,pressure=1.2" o "temperature:70,pressure:1.2"
+    - Dict: {"pressure": 50.0, "temperature": 70.0}
+    - String: "pressure=50,temperature=70" o "pressure:50,temperature:70"
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
-        machines (Union[List[str], str]): Lista de máquinas para las cuales aplica la regla (e.g., ["ModelA", "ModelB"])
-            o string JSON (Example, '["ModelA"]'). Se parseará automáticamente si es string.
-        key_figures (Union[Dict[str, Dict[str, float]], str]): Diccionario de campos numéricos y sus valores umbral
-            (Example, {"temperature": {"value": 80.0}}) o string JSON (Example, '{"temperature": {"value": 80.0}}').
-            Se parseará automáticamente si es string.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos para filtrar
-            (Example, {"material": "Steel", "batch": "B123"}). Por defecto None.
-        operator (str): Operador de la regla, debe ser uno de: ">=", "<=", ">", "<", "==", "!=".
-            Por defecto "<=".
-        unit (Optional[str]): Unidad de medida para los key_figures (e.g., "°C"). Por defecto None.
-        description (str): Descripción de la regla (Example., "Temperatura máxima por experiencia").
-            Por defecto "".
+        machines (Union[List[str], str]): Lista de máquinas o string JSON.
+            Ejemplo válido: ["EquipA"] o '["EquipA", "EquipB"]'
+        key_figures (Union[Dict[str, float], str]): Métricas y valores umbral.
+            Ejemplos válidos:
+            - {"pressure": 50.0, "temperature": 70.0}
+            - "pressure=50,temperature=70"
+            - "pressure:50,temperature:70"
+        key_values (Optional[Dict[str, str]]): Filtros categóricos.
+            Ejemplo: {"operation_mode": "Auto", "product_type": "WidgetA"}
+        operator (str): Operador de comparación (>=, <=, >, <, ==, !=).
+        unit (Optional[str]): Unidad de medida común para todas las métricas.
+        description (str): Descripción de la regla.
 
     Returns:
         str: JSON con estado y detalles de la regla creada.
@@ -448,18 +454,18 @@ async def add_custom_rule(
     Ejemplo de uso LLM:
         ```json
         {
-            "machines": ["ModelA"],
-            "key_figures": {"temperature": 70.0},
-            "operator": ">=",
-            "unit": "°C",
-            "description": "Temperatura mínima requerida"
+            "machines": ["EquipA"],
+            "key_figures": {"pressure": 50.0},
+            "operator": "<=",
+            "unit": "bar",
+            "description": "Límite de presión máximo"
         }
         ```
         o
         ```json
         {
-            "machines": ["ModelA", "ModelB"],
-            "key_figures": "temperature=70,pressure=1.2",
+            "machines": ["EquipA", "EquipB"],
+            "key_figures": "pressure=50,temperature=70",
             "operator": "<=",
             "description": "Límites superiores"
         }
@@ -471,32 +477,55 @@ async def add_custom_rule(
             try:
                 machines = json.loads(machines)
             except json.JSONDecodeError:
-                raise ValueError("Formato inválido para machines. Use lista JSON")
+                machines = [machines.strip()]  # Handle single machine string
 
         if not isinstance(machines, list):
             raise ValueError("machines debe ser una lista de strings")
 
         # Parse key_figures (acepta dict o string)
         if isinstance(key_figures, str):
-            parsed_figures = {}
-            for pair in key_figures.split(','):
-                if '=' in pair:
-                    field, value = pair.split('=', 1)
-                elif ':' in pair:
-                    field, value = pair.split(':', 1)
-                else:
-                    raise ValueError(f"Formato inválido: {pair}. Use 'campo=valor' o 'campo:valor'")
-                
-                field = field.strip()
-                try:
-                    parsed_figures[field] = float(value.strip())
-                except ValueError:
-                    raise ValueError(f"Valor inválido para {field}: debe ser numérico")
-            key_figures = parsed_figures
+            try:
+                # Try parsing as JSON first
+                parsed_figures = json.loads(key_figures)
+                if not isinstance(parsed_figures, dict):
+                    raise ValueError("key_figures JSON debe ser un diccionario")
+                key_figures = parsed_figures
+            except json.JSONDecodeError:
+                # Fallback to comma-separated pairs
+                parsed_figures = {}
+                for pair in key_figures.split(','):
+                    if '=' in pair:
+                        field, value = pair.split('=', 1)
+                    elif ':' in pair:
+                        field, value = pair.split(':', 1)
+                    else:
+                        raise ValueError(f"Formato inválido: {pair}. Use 'campo=valor' o 'campo:valor'")
+                    
+                    field = field.strip()
+                    try:
+                        parsed_figures[field] = float(value.strip())
+                    except ValueError:
+                        raise ValueError(f"Valor inválido para {field}: debe ser numérico")
+                key_figures = parsed_figures
         elif isinstance(key_figures, dict):
+            parsed_figures = {}
             for field, value in key_figures.items():
-                if not isinstance(value, (int, float)):
+                if isinstance(value, dict) and 'value' in value:
+                    # Handle deprecated nested format
+                    logger.warning(
+                        f"Received deprecated key_figures format for {field}: {value}. "
+                        "Please use flat format like {'pressure': 5.0} and specify unit separately."
+                    )
+                    if not isinstance(value['value'], (int, float)):
+                        raise ValueError(f"Valor para {field} debe ser numérico")
+                    parsed_figures[field] = float(value['value'])
+                    if 'unit' in value and unit is None:
+                        unit = value['unit']
+                elif isinstance(value, (int, float)):
+                    parsed_figures[field] = float(value)
+                else:
                     raise ValueError(f"Valor para {field} debe ser numérico")
+            key_figures = parsed_figures
         else:
             raise ValueError("key_figures debe ser dict o string")
 
@@ -511,23 +540,40 @@ async def add_custom_rule(
         if fields_info["status"] != "success":
             raise ValueError("No se pudo validar contra la API")
 
-        # Determinar el campo identificador dinámicamente para validar máquinas
+        # Log fields_info for debugging
+        logger.debug(f"fields_info: {json.dumps(fields_info, ensure_ascii=False)}")
+
+        # Determinar el campo identificador dinámicamente (priorizar equipment_id)
         identifier_field = None
         for field in fields_info["key_values"]:
-            if field not in ["start_date", "end_date"]:
+            if field == "equipment_id":
                 identifier_field = field
                 break
+        if not identifier_field:
+            for field in fields_info["key_values"]:
+                if field not in ["start_date", "end_date", "date"]:
+                    identifier_field = field
+                    break
+
+        if not identifier_field:
+            raise ValueError("No se encontró un campo identificador válido (como equipment_id) en la API")
 
         # Validar máquinas
         valid_machines = fields_info["key_values"].get(identifier_field, [])
         invalid_machines = [m for m in machines if m not in valid_machines]
         if invalid_machines:
-            raise ValueError(f"Máquinas inválidas: {invalid_machines}")
+            raise ValueError(
+                f"Máquinas inválidas: {invalid_machines}. "
+                f"Máquinas válidas para {identifier_field}: {valid_machines or ['Ninguna']}"
+            )
 
         # Validar métricas
         invalid_metrics = [f for f in key_figures if f not in fields_info["key_figures"]]
         if invalid_metrics:
-            raise ValueError(f"Métricas inválidas: {invalid_metrics}")
+            raise ValueError(
+                f"Métricas inválidas: {invalid_metrics}. "
+                f"Métricas válidas: {fields_info['key_figures']}"
+            )
 
         # Validar operador
         valid_operators = [">=", "<=", ">", "<", "==", "!="]
@@ -538,12 +584,12 @@ async def add_custom_rule(
         if key_values:
             for k, v in key_values.items():
                 if k not in fields_info["key_values"] or v not in fields_info["key_values"].get(k, []):
-                    raise ValueError(f"Filtro inválido: {k}={v}")
+                    raise ValueError(f"Filtro inválido: {k}={v}. Valores válidos para {k}: {fields_info['key_values'].get(k, [])}")
 
-        # Preparar regla final (convertir valores float)
+        # Preparar regla final (valores planos)
         final_rule = {
             "machines": machines,
-            "key_figures": {k: {"value": float(v)} for k, v in key_figures.items()},
+            "key_figures": {k: float(v) for k, v in key_figures.items()},
             "key_values": key_values or {},
             "operator": operator,
             "unit": unit,
@@ -768,67 +814,7 @@ async def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
-
-    Esta herramienta realiza las siguientes acciones:
-    1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
-    2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data.
-    3. Carga reglas SOP y personalizadas para las máquinas relevantes.
-    4. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
-    5. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
-    6. Devuelve un informe detallado con resultados de cumplimiento.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Example, {"equipment_id": "EquipA", "operation_mode": "Auto", "product_type":"WidgetC", "status":"Running","start_date": "2025-04-09",
-            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
-        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (Example, ["pressure", "uptime"]).
-
-    Returns:
-        str: Cadena JSON con el estado, período, filtro de máquina, métricas analizadas,
-            resultados del análisis, cobertura de reglas, y notas.
-            Ejemplo:
-            {
-                "status": "success",
-                "period": "2025-04-09 to 2025-04-11",
-                "machine_filter": "ModelA",
-                "metrics_analyzed": ["temperature"],
-                "results": [
-                    {
-                        "id": 1,
-                        "date": "2025-04-10",
-                        "machine": "ModelA",
-                        "metrics": {"temperature": 75.0},
-                        "compliance": {
-                            "temperature": {
-                                "sop": {"value": 75.0, "rule": "<= 80.0°C", "status": "compliant"},
-                                "custom": [
-                                    {
-                                        "value": 75.0,
-                                        "rule": "<= 78.0°C",
-                                        "status": "compliant",
-                                        "description": "Temperatura máxima por experiencia",
-                                        "filters": {"material": "Steel"}
-                                    }
-                                ]
-                            }
-                        },
-                        "compliance_percentage": 100.0
-                    }
-                ],
-                "sop_coverage": "1/1 machines with SOP",
-                "custom_rules_applied": "1/1 machines with custom rules",
-                "analysis_notes": [
-                    "sop: Rules from Standard Operating Procedures",
-                    "custom: User-defined expert rules",
-                    "compliant: Meets rule requirement",
-                    "non_compliant: Does not meet rule requirement",
-                    "unknown: No rule defined"
-                ]
-            }
-    """
+    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas."""
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
@@ -841,10 +827,16 @@ async def analyze_compliance(
         identifier_field = None
         identifier_value = None
         for field in valid_values:
-            if field in key_values and field not in ["start_date", "end_date"]:
+            if field == "equipment_id":
                 identifier_field = field
-                identifier_value = key_values[field]
+                identifier_value = key_values.get(field)
                 break
+        if not identifier_field:
+            for field in valid_values:
+                if field not in ["start_date", "end_date", "date"]:
+                    identifier_field = field
+                    identifier_value = key_values.get(field)
+                    break
         
         # Fetch manufacturing data
         fetch_result = json.loads(await fetch_mes_data(ctx, key_values, key_figures))
@@ -925,7 +917,7 @@ async def analyze_compliance(
                     if rule["key_values"]:
                         if not all(record.get(k) == v for k, v in rule["key_values"].items()):
                             continue
-                    rule_value = rule["key_figures"][field]["value"]
+                    rule_value = rule["key_figures"][field]  # Valor plano
                     op = rule["operator"]
                     value = record[field]
                     is_compliant = False
@@ -979,11 +971,11 @@ async def analyze_compliance(
             "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP",
             "custom_rules_applied": f"{len(custom_rules)} custom rules applied",
             "analysis_notes": [
-                "sop: Rules from Standard Operating Procedures",
-                "custom: User-defined expert rules",
-                "compliant: Meets rule requirement",
-                "non_compliant: Does not meet rule requirement",
-                "unknown: No rule defined"
+                "sop: Reglas de Procedimientos Operativos Estándar",
+                "custom: Reglas definidas por el usuario",
+                "compliant: Cumple con el requisito",
+                "non_compliant: No cumple con el requisito",
+                "unknown: No hay regla definida"
             ]
         }, ensure_ascii=False)
 
