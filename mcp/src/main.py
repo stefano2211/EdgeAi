@@ -50,14 +50,7 @@ class AuthClient:
         self.token = None
 
     async def authenticate(self):
-        """Autentica contra la API y obtiene un token de sesión.
-
-        Realiza una solicitud POST al endpoint /login de la API con las credenciales
-        proporcionadas. Almacena el token JWT recibido para usarlo en solicitudes futuras.
-
-        Raises:
-            ValueError: Si la autenticación falla debido a credenciales inválidas o error del servidor.
-        """
+        """Autentica contra la API y obtiene un token de sesión."""
         try:
             response = await self.client.post(
                 f"{self.base_url}/login",
@@ -72,21 +65,7 @@ class AuthClient:
             raise ValueError(f"No se pudo autenticar: {str(e)}")
 
     async def get(self, endpoint: str, params: Optional[Dict] = None) -> httpx.Response:
-        """Realiza una solicitud GET autenticada a la API.
-
-        Usa el token almacenado para autenticar la solicitud. Si el token no existe,
-        realiza la autenticación primero. Si recibe un error 401, reautentica y reintenta.
-
-        Args:
-            endpoint (str): Endpoint de la API (e.g., "/machines/").
-            params (Optional[Dict]): Parámetros de consulta para la solicitud.
-
-        Returns:
-            httpx.Response: Respuesta de la API.
-
-        Raises:
-            Exception: Si la solicitud falla después de reintentar la autenticación.
-        """
+        """Realiza una solicitud GET autenticada a la API."""
         if not self.token:
             await self.authenticate()
         
@@ -119,14 +98,7 @@ class AuthClient:
 auth_client = None
 
 def init_infrastructure():
-    """Inicializa la infraestructura del MCP, incluyendo Qdrant, MinIO y el cliente autenticado.
-
-    Configura las colecciones en Qdrant para almacenar logs, PDFs y reglas personalizadas,
-    crea el bucket en MinIO si no existe, e inicializa el cliente autenticado para la API.
-
-    Raises:
-        Exception: Si falla la inicialización de algún componente.
-    """
+    """Inicializa la infraestructura del MCP, incluyendo Qdrant, MinIO y el cliente autenticado."""
     global auth_client
     try:
         vector_config = models.VectorParams(size=384, distance=models.Distance.COSINE)
@@ -145,72 +117,51 @@ class DataValidator:
     
     @staticmethod
     def validate_date(date_str: str, field: str) -> None:
-        """Valida que una fecha tenga el formato YYYY-MM-DD.
-
-        Args:
-            date_str (str): Cadena de fecha a validar.
-            field (str): Nombre del campo (para mensajes de error).
-
-        Raises:
-            ValueError: Si la fecha no tiene el formato correcto.
-        """
+        """Valida que una fecha tenga el formato YYYY-MM-DD."""
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
-            raise ValueError(f"Invalid format for {field}. Use YYYY-MM-DD: {date_str}")
+            raise ValueError(f"Formato inválido para {field}. Use YYYY-MM-DD: {date_str}")
 
     @staticmethod
     async def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict[str, str]) -> Dict:
-        """Valida que los campos solicitados sean válidos según la estructura de la API.
+        """Valida que los campos solicitados sean válidos según la estructura de la API."""
+        try:
+            fields_info = json.loads(await list_fields(ctx))
+            if fields_info["status"] != "success":
+                raise ValueError("No se pudo validar contra la API")
 
-        También valida las fechas (start_date y end_date) si están presentes en key_values,
-        asegurando que tengan el formato correcto y que start_date no sea posterior a end_date.
+            if "start_date" in key_values or "end_date" in key_values:
+                if "start_date" not in key_values or "end_date" not in key_values:
+                    raise ValueError("Deben proporcionarse tanto start_date como end_date")
+                DataValidator.validate_date(key_values["start_date"], "start_date")
+                DataValidator.validate_date(key_values["end_date"], "end_date")
+                if key_values["start_date"] > key_values["end_date"]:
+                    raise ValueError("start_date no puede ser posterior a end_date")
 
-        Args:
-            ctx (Context): Contexto de la solicitud FastMCP.
-            key_figures (List[str]): Lista de campos numéricos a validar.
-            key_values (Dict[str, str]): Diccionario de campos categóricos y sus valores,
-                incluyendo fechas (start_date, end_date).
-
-        Returns:
-            Dict: Información de campos válidos obtenida de list_fields.
-
-        Raises:
-            ValueError: Si los campos o fechas no son válidos o si list_fields falla.
-        """
-        fields_info = json.loads(await list_fields(ctx))
-        if fields_info["status"] != "success":
-            raise ValueError("Could not validate fields against API")
-
-        if "start_date" in key_values or "end_date" in key_values:
-            if "start_date" not in key_values or "end_date" not in key_values:
-                raise ValueError("Both start_date and end_date must be provided")
-            DataValidator.validate_date(key_values["start_date"], "start_date")
-            DataValidator.validate_date(key_values["end_date"], "end_date")
-            if key_values["start_date"] > key_values["end_date"]:
-                raise ValueError("start_date cannot be after end_date")
-
-        invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
-        invalid_values = {
-            k: v for k, v in key_values.items()
-            if k not in fields_info["key_values"] and k not in ["start_date", "end_date"]
-            or (k in fields_info["key_values"] and v not in fields_info["key_values"].get(k, []))
-        }
-        
-        if invalid_figures or invalid_values:
-            errors = []
-            if invalid_figures:
-                errors.append(f"Invalid key_figures: {invalid_figures}")
-            if invalid_values:
-                errors.append(f"Invalid key_values: {invalid_values}")
-            raise ValueError(" | ".join(errors))
+            invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
+            invalid_values = {
+                k: v for k, v in key_values.items()
+                if k not in fields_info["key_values"] and k not in ["start_date", "end_date"]
+                or (k in fields_info["key_values"] and v not in fields_info["key_values"].get(k, []))
+            }
             
-        return fields_info
+            if invalid_figures or invalid_values:
+                errors = []
+                if invalid_figures:
+                    errors.append(f"Campos numéricos inválidos: {invalid_figures}")
+                if invalid_values:
+                    errors.append(f"Campos categóricos inválidos: {invalid_values}")
+                raise ValueError(" | ".join(errors))
+            
+            return fields_info
+        except Exception as e:
+            logger.error(f"Validación de campos falló: {str(e)}")
+            raise
 
 @mcp.tool()
 async def list_fields(ctx: Context) -> str:
-    """Lista los campos disponibles en los datos de la API MES.
-    """
+    """Lista los campos disponibles en los datos de la API MES."""
     try:
         response = await auth_client.get("/machines/")
         response.raise_for_status()
@@ -219,7 +170,7 @@ async def list_fields(ctx: Context) -> str:
         if not records:
             return json.dumps({
                 "status": "no_data",
-                "message": "No records found in MES system",
+                "message": "No se encontraron registros en el sistema MES",
                 "key_figures": [],
                 "key_values": {}
             })
@@ -244,7 +195,7 @@ async def list_fields(ctx: Context) -> str:
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Field listing failed: {str(e)}")
+        logger.error(f"Listado de campos falló: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
@@ -258,26 +209,35 @@ async def fetch_mes_data(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Obtiene datos de la API MES o Qdrant, filtra dinámicamente y almacena en la base de datos vectorial.
-    """
+    """Obtiene datos de la API MES o Qdrant, filtra dinámicamente y almacena en la base de datos vectorial."""
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
         
         # Validate requested fields and dates
-        await DataValidator.validate_fields(ctx, key_figures, key_values)
+        fields_info = await DataValidator.validate_fields(ctx, key_figures, key_values)
+        valid_values = fields_info["key_values"]
+        
+        # Determinar el campo identificador dinámicamente
+        identifier_field = None
+        identifier_value = None
+        for field in valid_values:
+            if field in key_values and field not in ["start_date", "end_date"]:
+                identifier_field = field
+                identifier_value = key_values[field]
+                break
         
         # Check Qdrant for existing data
         must_conditions = []
-        if "machine" in key_values:
-            must_conditions.append(models.FieldCondition(key="machine", match=models.MatchValue(value=key_values["machine"])))
+        if identifier_field and identifier_value:
+            must_conditions.append(models.FieldCondition(key=identifier_field, match=models.MatchValue(value=identifier_value)))
         if "start_date" in key_values and "end_date" in key_values:
             must_conditions.append(models.FieldCondition(
                 key="date",
                 match=models.MatchText(text=f"[{key_values['start_date']} TO {key_values['end_date']}]")
             ))
         for k, v in key_values.items():
-            if k not in ["machine", "start_date", "end_date"]:
+            if k not in [identifier_field, "start_date", "end_date"]:
                 must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
 
         qdrant_results = qdrant_client.scroll(
@@ -302,7 +262,7 @@ async def fetch_mes_data(
             data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
 
             # Determine API endpoint
-            endpoint = f"/machines/{data_filters['machine']}" if "machine" in data_filters else "/machines/"
+            endpoint = f"/machines/{identifier_value}" if identifier_field and identifier_value else "/machines/"
 
             # Fetch data
             response = await auth_client.get(endpoint, params=params)
@@ -312,11 +272,11 @@ async def fetch_mes_data(
             # Filter and process records
             processed_data = []
             for record in data:
-                if all(record.get(k) == v for k, v in data_filters.items() if k != "machine"):
+                if all(record.get(k) == v for k, v in data_filters.items() if k != identifier_field):
                     item = {
                         "id": record["id"],
                         "date": record["date"],
-                        "machine": record["machine"]
+                        identifier_field: record[identifier_field] if identifier_field else None
                     }
                     item.update({f: record[f] for f in key_figures if f in record})
                     processed_data.append(item)
@@ -347,7 +307,6 @@ async def fetch_mes_data(
             "data": []
         }, ensure_ascii=False)
 
-
 @mcp.tool()
 async def load_sop(ctx: Context, machine: str) -> str:
     """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO."""
@@ -377,7 +336,7 @@ async def load_sop(ctx: Context, machine: str) -> str:
             available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
             return json.dumps({
                 "status": "error",
-                "message": f"PDF not found. Available SOPs: {', '.join(available_pdfs)}",
+                "message": f"PDF no encontrado. SOPs disponibles: {', '.join(available_pdfs)}",
                 "machine": machine
             }, ensure_ascii=False)
 
@@ -390,7 +349,7 @@ async def load_sop(ctx: Context, machine: str) -> str:
         patterns = [
             (r"(?P<field>cycle_time|ciclo)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*segundos?", "<=", "s"),
             (r"(?P<field>error_count|errores)\s*(?P<operator><=|≤)\s*(?P<value>\d+)", "<=", ""),
-            (r"(?P<field>pressure|presión)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*bar", "<=", "bar\\[0.5mm]bar", "<=", "bar"),
+            (r"(?P<field>pressure|presión)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*bar", "<=", "bar"),
             (r"(?P<field>power_consumption|consumo)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*kW", "<=", "kW"),
             (r"(?P<field>output_rate|producción)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*unidades/h", ">=", "units/h")
         ]
@@ -419,7 +378,7 @@ async def load_sop(ctx: Context, machine: str) -> str:
         if not rules:
             return json.dumps({
                 "status": "error",
-                "message": "No compliance rules found in document",
+                "message": "No se encontraron reglas de cumplimiento en el documento",
                 "machine": machine
             }, ensure_ascii=False)
 
@@ -445,20 +404,18 @@ async def load_sop(ctx: Context, machine: str) -> str:
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"SOP processing failed for {machine}: {str(e)}")
+        logger.error(f"Procesamiento de SOP falló para {machine}: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
             "machine": machine
         }, ensure_ascii=False)
 
-
-
 @mcp.tool()
 async def add_custom_rule(
     ctx: Context,
     machines: Union[List[str], str],
-    key_figures: Union[Dict[str, float], str],  # Acepta dict o string
+    key_figures: Union[Dict[str, float], str],
     key_values: Optional[Dict[str, str]] = None,
     operator: str = "<=",
     unit: Optional[str] = None,
@@ -523,7 +480,6 @@ async def add_custom_rule(
         if isinstance(key_figures, str):
             parsed_figures = {}
             for pair in key_figures.split(','):
-                # Soporta = o : como separador
                 if '=' in pair:
                     field, value = pair.split('=', 1)
                 elif ':' in pair:
@@ -538,7 +494,6 @@ async def add_custom_rule(
                     raise ValueError(f"Valor inválido para {field}: debe ser numérico")
             key_figures = parsed_figures
         elif isinstance(key_figures, dict):
-            # Validar que los valores sean numéricos
             for field, value in key_figures.items():
                 if not isinstance(value, (int, float)):
                     raise ValueError(f"Valor para {field} debe ser numérico")
@@ -556,8 +511,15 @@ async def add_custom_rule(
         if fields_info["status"] != "success":
             raise ValueError("No se pudo validar contra la API")
 
+        # Determinar el campo identificador dinámicamente para validar máquinas
+        identifier_field = None
+        for field in fields_info["key_values"]:
+            if field not in ["start_date", "end_date"]:
+                identifier_field = field
+                break
+
         # Validar máquinas
-        valid_machines = fields_info["key_values"].get("machine", [])
+        valid_machines = fields_info["key_values"].get(identifier_field, [])
         invalid_machines = [m for m in machines if m not in valid_machines]
         if invalid_machines:
             raise ValueError(f"Máquinas inválidas: {invalid_machines}")
@@ -638,7 +600,6 @@ async def add_custom_rule(
                 "description": description
             }
         }, ensure_ascii=False)
-
 
 @mcp.tool()
 async def list_custom_rules(
@@ -728,13 +689,12 @@ async def list_custom_rules(
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Error listing rules: {str(e)}")
+        logger.error(f"Error al listar reglas: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
             "rules": []
         }, ensure_ascii=False)
-
 
 @mcp.tool()
 async def delete_custom_rule(
@@ -795,15 +755,13 @@ async def delete_custom_rule(
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Error deleting rule {rule_id}: {str(e)}")
+        logger.error(f"Error al eliminar regla {rule_id}: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
             "rule_id": rule_id
         }, ensure_ascii=False)
 
-
-        
 @mcp.tool()
 async def analyze_compliance(
     ctx: Context,
@@ -877,6 +835,16 @@ async def analyze_compliance(
         
         # Validate requested fields and dates
         fields_info = await DataValidator.validate_fields(ctx, key_figures, key_values)
+        valid_values = fields_info["key_values"]
+        
+        # Determinar el campo identificador dinámicamente
+        identifier_field = None
+        identifier_value = None
+        for field in valid_values:
+            if field in key_values and field not in ["start_date", "end_date"]:
+                identifier_field = field
+                identifier_value = key_values[field]
+                break
         
         # Fetch manufacturing data
         fetch_result = json.loads(await fetch_mes_data(ctx, key_values, key_figures))
@@ -888,7 +856,7 @@ async def analyze_compliance(
             }, ensure_ascii=False)
 
         # Load SOP rules for relevant machines
-        machines = {r["machine"] for r in fetch_result["data"]}
+        machines = {r[identifier_field] for r in fetch_result["data"] if identifier_field}
         machine_rules = {}
         for machine in machines:
             sop_result = json.loads(await load_sop(ctx, machine))
@@ -911,7 +879,7 @@ async def analyze_compliance(
             analysis = {
                 "id": record["id"],
                 "date": record["date"],
-                "machine": record["machine"],
+                "machine": record[identifier_field] if identifier_field else None,
                 "metrics": {f: record[f] for f in key_figures if f in record},
                 "compliance": {},
                 "compliance_percentage": 0.0
@@ -928,7 +896,7 @@ async def analyze_compliance(
                 compliance_info = {}
                 
                 # Check SOP rule
-                sop_rules = machine_rules.get(record["machine"], {})
+                sop_rules = machine_rules.get(record[identifier_field] if identifier_field else "", {})
                 if field in sop_rules:
                     rule = sop_rules[field]
                     value = record[field]
@@ -952,7 +920,7 @@ async def analyze_compliance(
                 for rule in custom_rules:
                     if field not in rule["key_figures"]:
                         continue
-                    if record["machine"] not in rule["machines"]:
+                    if identifier_field and record[identifier_field] not in rule["machines"]:
                         continue
                     if rule["key_values"]:
                         if not all(record.get(k) == v for k, v in rule["key_values"].items()):
@@ -1005,7 +973,7 @@ async def analyze_compliance(
         return json.dumps({
             "status": "success",
             "period": period,
-            "machine_filter": key_values.get("machine", "all machines"),
+            "machine_filter": identifier_value if identifier_value else "all machines",
             "metrics_analyzed": key_figures,
             "results": results,
             "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP",
@@ -1020,7 +988,7 @@ async def analyze_compliance(
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Compliance analysis failed: {str(e)}")
+        logger.error(f"Análisis de cumplimiento falló: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
