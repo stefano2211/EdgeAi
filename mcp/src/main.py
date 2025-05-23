@@ -210,35 +210,6 @@ class DataValidator:
 @mcp.tool()
 async def list_fields(ctx: Context) -> str:
     """Lista los campos disponibles en los datos de la API MES.
-
-    Esta herramienta consulta la API para obtener una muestra de registros y clasifica
-    los campos en dos categorías:
-    - key_figures: Campos numéricos (int o float) que pueden usarse para métricas.
-    - key_values: Campos categóricos (strings) con sus valores únicos.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP, usado para autenticación y logging.
-
-    Returns:
-        str: Cadena JSON con el estado, key_figures, key_values, y mensaje de error si aplica.
-            Ejemplo:
-            {
-                "status": "success",
-                "key_figures": ["uptime", "defects", "temperature"],
-                "key_values": {
-                    "machine": ["ModelA", "ModelB"],
-                    "material": ["Steel", "Aluminum"],
-                    "date": ["2025-04-09", "2025-04-10"]
-                }
-            }
-
-    Raises:
-        Exception: Si falla la solicitud a la API o el procesamiento de los datos.
-                  Devuelve un JSON con status="error" y el mensaje de error.
-
-    Ejemplo de uso:
-        await list_fields(ctx)
-        # Retorna JSON con los campos disponibles para filtrar y analizar.
     """
     try:
         response = await auth_client.get("/machines/")
@@ -288,41 +259,6 @@ async def fetch_mes_data(
     key_figures: Optional[List[str]] = None
 ) -> str:
     """Obtiene datos de la API MES o Qdrant, filtra dinámicamente y almacena en la base de datos vectorial.
-
-    Esta herramienta optimiza la carga de datos verificando primero si los datos existen en Qdrant
-    para el rango de fechas y filtros solicitados, reduciendo llamadas a la API en entornos edge-cloud.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (example, {"machine": "ModelA", "material": "Steel", "start_date": "2025-04-09",
-            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
-        key_figures (Optional[List[str]]): Lista de campos numéricos a incluir
-            (example, ["uptime", "temperature"]).
-
-    Returns:
-        str: Cadena JSON con el estado, conteo de registros, datos procesados, y mensaje de error si aplica.
-            Ejemplo:
-            {
-                "status": "success",
-                "count": 5,
-                "data": [
-                    {"id": 1, "date": "2025-04-10", "machine": "ModelA", "temperature": 75.0},
-                    ...
-                ]
-            }
-
-    Raises:
-        Exception: Si falla la validación, la solicitud a la API, o el almacenamiento en Qdrant.
-                  Devuelve un JSON con status="error" y el mensaje de error.
-
-    Ejemplo de uso:
-        await fetch_mes_data(
-            ctx,
-            key_values={"machine": "ModelA", "start_date": "2025-04-09", "end_date": "2025-04-11"},
-            key_figures=["temperature"]
-        )
-        # Retorna datos filtrados para ModelA entre las fechas especificadas.
     """
     try:
         key_values = key_values or {}
@@ -414,33 +350,6 @@ async def fetch_mes_data(
 @mcp.tool()
 async def load_sop(ctx: Context, machine: str) -> str:
     """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO.
-
-    Esta herramienta verifica si el SOP ya está en Qdrant antes de cargar el PDF,
-    optimizando el tiempo de ejecución para entornos edge-cloud.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        machine (str): Nombre de la máquina para la cual cargar el SOP (e.g., "ModelA").
-
-    Returns:
-        str: Cadena JSON con el estado, máquina, reglas extraídas, y mensaje de error si aplica.
-            Ejemplo:
-            {
-                "status": "success",
-                "machine": "ModelA",
-                "rules": {
-                    "uptime": {"value": 95.0, "operator": ">=", "unit": "%", "source_text": "uptime >= 95.0%"},
-                    "temperature": {"value": 80.0, "operator": "<=", "unit": "°C", "source_text": "temperature <= 80.0°C"}
-                }
-            }
-
-    Raises:
-        Exception: Si falla la carga del PDF, la extracción de reglas, o el almacenamiento en Qdrant.
-                  Devuelve un JSON con status="error" y el mensaje de error.
-
-    Ejemplo de uso:
-        await load_sop(ctx, machine="ModelA")
-        # Carga el SOP para ModelA y retorna las reglas extraídas.
     """
     try:
         # Check if SOP already exists in Qdrant
@@ -538,17 +447,17 @@ async def load_sop(ctx: Context, machine: str) -> str:
 async def add_custom_rule(
     ctx: Context,
     machines: Union[List[str], str],
-    key_figures: Union[Dict[str, Dict[str, float]], str],
+    key_figures: Union[Dict[str, float], str],  # Acepta dict o string
     key_values: Optional[Dict[str, str]] = None,
     operator: str = "<=",
     unit: Optional[str] = None,
     description: str = ""
 ) -> str:
-    """Añade una regla de cumplimiento personalizada para múltiples máquinas.
+    """Añade una regla de cumplimiento personalizada para múltiples máquinas y métricas.
 
-    Esta herramienta permite a los usuarios definir reglas expertas basadas en su experiencia,
-    aplicables a múltiples máquinas y campos numéricos (key_figures) con filtros categóricos
-    (key_values). Las reglas se almacenan en Qdrant para su uso en el análisis de cumplimiento.
+    Versión mejorada que acepta:
+    - Dict: {"temperature": 70.0, "pressure": 1.2}
+    - String: "temperature=70,pressure=1.2" o "temperature:70,pressure:1.2"
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
@@ -566,132 +475,324 @@ async def add_custom_rule(
             Por defecto "".
 
     Returns:
-        str: Cadena JSON con el estado y mensaje de confirmación o error.
-            Ejemplo:
-            {
-                "status": "success",
-                "message": "Custom rule added for ModelA, ModelB: temperature <= 80.0°C, material=Steel",
-                "rule": {
-                    "machines": ["ModelA", "ModelB"],
-                    "key_figures": {"temperature": {"value": 80.0}},
-                    "key_values": {"material": "Steel"},
-                    "operator": "<=",
-                    "unit": "°C",
-                    "description": "Temperatura máxima por experiencia"
-                }
-            }
+        str: JSON con estado y detalles de la regla creada.
 
-    Raises:
-        Exception: Si falla la validación de máquinas, campos, operador, o el almacenamiento en Qdrant.
-                  Devuelve un JSON con status="error" y el mensaje de error.
-
-    Ejemplo de uso:
-        await add_custom_rule(
-            ctx,
-            machines=["ModelA", "ModelB"],
-            key_figures={"temperature": {"value": 80.0}},
-            key_values={"material": "Steel"},
-            operator="<=",
-            unit="°C",
-            description="Temperatura máxima por experiencia"
-        )
-        # Añade una regla personalizada para ModelA y ModelB con filtros.
+    Ejemplo de uso LLM:
+        ```json
+        {
+            "machines": ["ModelA"],
+            "key_figures": {"temperature": 70.0},
+            "operator": ">=",
+            "unit": "°C",
+            "description": "Temperatura mínima requerida"
+        }
+        ```
+        o
+        ```json
+        {
+            "machines": ["ModelA", "ModelB"],
+            "key_figures": "temperature=70,pressure=1.2",
+            "operator": "<=",
+            "description": "Límites superiores"
+        }
+        ```
     """
     try:
-        # Parse machines if provided as string
+        # Parse machines
         if isinstance(machines, str):
             try:
                 machines = json.loads(machines)
             except json.JSONDecodeError:
-                raise ValueError("Invalid JSON string for machines")
+                raise ValueError("Formato inválido para machines. Use lista JSON")
+
         if not isinstance(machines, list):
-            raise ValueError("machines must be a list of strings")
+            raise ValueError("machines debe ser una lista de strings")
 
-        # Parse key_figures if provided as string
+        # Parse key_figures (acepta dict o string)
         if isinstance(key_figures, str):
-            try:
-                key_figures = json.loads(key_figures)
-            except json.JSONDecodeError:
-                raise ValueError("Invalid JSON string for key_figures")
-        if not isinstance(key_figures, dict):
-            raise ValueError("key_figures must be a dictionary")
+            parsed_figures = {}
+            for pair in key_figures.split(','):
+                # Soporta = o : como separador
+                if '=' in pair:
+                    field, value = pair.split('=', 1)
+                elif ':' in pair:
+                    field, value = pair.split(':', 1)
+                else:
+                    raise ValueError(f"Formato inválido: {pair}. Use 'campo=valor' o 'campo:valor'")
+                
+                field = field.strip()
+                try:
+                    parsed_figures[field] = float(value.strip())
+                except ValueError:
+                    raise ValueError(f"Valor inválido para {field}: debe ser numérico")
+            key_figures = parsed_figures
+        elif isinstance(key_figures, dict):
+            # Validar que los valores sean numéricos
+            for field, value in key_figures.items():
+                if not isinstance(value, (int, float)):
+                    raise ValueError(f"Valor para {field} debe ser numérico")
+        else:
+            raise ValueError("key_figures debe ser dict o string")
 
-        # Validar máquinas
+        # Validación de datos
         if not machines:
-            raise ValueError("At least one machine must be specified")
+            raise ValueError("Debe especificar al menos una máquina")
+
+        if not key_figures:
+            raise ValueError("Debe especificar al menos una métrica")
+
         fields_info = json.loads(await list_fields(ctx))
         if fields_info["status"] != "success":
-            raise ValueError("Could not validate fields against API")
+            raise ValueError("No se pudo validar contra la API")
+
+        # Validar máquinas
         valid_machines = fields_info["key_values"].get("machine", [])
         invalid_machines = [m for m in machines if m not in valid_machines]
         if invalid_machines:
-            raise ValueError(f"Invalid machines: {invalid_machines}")
+            raise ValueError(f"Máquinas inválidas: {invalid_machines}")
 
-        # Validar key_figures
-        if not key_figures:
-            raise ValueError("At least one key_figure must be specified")
-        for field in key_figures:
-            if field not in fields_info["key_figures"]:
-                raise ValueError(f"Invalid key_figure: {field}. Must be one of {fields_info['key_figures']}")
-            if "value" not in key_figures[field] or not isinstance(key_figures[field]["value"], (int, float)):
-                raise ValueError(f"Invalid value for {field}: must be a number")
+        # Validar métricas
+        invalid_metrics = [f for f in key_figures if f not in fields_info["key_figures"]]
+        if invalid_metrics:
+            raise ValueError(f"Métricas inválidas: {invalid_metrics}")
+
+        # Validar operador
+        valid_operators = [">=", "<=", ">", "<", "==", "!="]
+        if operator not in valid_operators:
+            raise ValueError(f"Operador inválido. Use uno de: {valid_operators}")
 
         # Validar key_values
         if key_values:
             for k, v in key_values.items():
                 if k not in fields_info["key_values"] or v not in fields_info["key_values"].get(k, []):
-                    raise ValueError(f"Invalid key_value: {k}={v}")
+                    raise ValueError(f"Filtro inválido: {k}={v}")
 
-        # Validar operador
-        valid_operators = [">=", "<=", ">", "<", "==", "!="]
-        if operator not in valid_operators:
-            raise ValueError(f"Operator must be one of: {valid_operators}")
-
-        # Crear regla
-        rule = {
+        # Preparar regla final (convertir valores float)
+        final_rule = {
             "machines": machines,
-            "key_figures": key_figures,
+            "key_figures": {k: {"value": float(v)} for k, v in key_figures.items()},
             "key_values": key_values or {},
             "operator": operator,
             "unit": unit,
             "description": description
         }
 
-        # Generar embedding
+        # Almacenar en Qdrant
         embedding_text = description or " ".join(
-            [f"{field} {operator} {key_figures[field]['value']}{unit or ''}" for field in key_figures]
+            [f"{k} {operator} {v}{unit or ''}" for k, v in key_figures.items()]
         )
         embedding = model.encode(embedding_text).tolist()
 
-        # Almacenar en Qdrant
         qdrant_client.upsert(
             collection_name="custom_rules",
             points=[models.PointStruct(
-                id=hashlib.md5(json.dumps(rule).encode()).hexdigest(),
+                id=hashlib.md5(json.dumps(final_rule).encode()).hexdigest(),
                 vector=embedding,
-                payload=rule
+                payload=final_rule
             )]
         )
 
-        message = f"Custom rule added for {', '.join(machines)}: " + ", ".join(
-            [f"{field} {operator} {key_figures[field]['value']}{unit or ''}" for field in key_figures]
+        # Mensaje descriptivo
+        metrics_desc = ", ".join(
+            [f"{k} {operator} {v}{unit or ''}" for k, v in key_figures.items()]
         )
-        if key_values:
-            message += ", " + ", ".join([f"{k}={v}" for k, v in key_values.items()])
+        filters_desc = ", ".join([f"{k}={v}" for k, v in (key_values or {}).items()])
+        
+        message = f"Regla añadida para {len(machines)} máquina(s): {metrics_desc}"
+        if filters_desc:
+            message += f" | Filtros: {filters_desc}"
 
         return json.dumps({
             "status": "success",
             "message": message,
-            "rule": rule
+            "rule": final_rule,
+            "details": {
+                "machines_count": len(machines),
+                "metrics_count": len(key_figures),
+                "filters_count": len(key_values or {})
+            }
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Failed to add custom rule: {str(e)}")
+        logger.error(f"Error al añadir regla: {str(e)}")
         return json.dumps({
             "status": "error",
-            "message": str(e)
+            "message": str(e),
+            "input_parameters": {
+                "machines": machines,
+                "key_figures": key_figures,
+                "key_values": key_values,
+                "operator": operator,
+                "unit": unit,
+                "description": description
+            }
         }, ensure_ascii=False)
 
+
+@mcp.tool()
+async def list_custom_rules(
+    ctx: Context,
+    rule_id: Optional[str] = None,
+    machine: Optional[str] = None,
+    limit: int = 10
+) -> str:
+    """Lista todas las reglas personalizadas o filtra por ID/máquina.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        rule_id (Optional[str]): ID específico de la regla a buscar.
+        machine (Optional[str]): Nombre de máquina para filtrar reglas.
+        limit (int): Límite de resultados a devolver (default: 10).
+
+    Returns:
+        str: JSON con lista de reglas y sus metadatos.
+
+    Ejemplo de uso LLM:
+        ```json
+        {"rule_id": "a1b2c3d4"}
+        ```
+        o
+        ```json
+        {"machine": "ModelA", "limit": 5}
+        ```
+    """
+    try:
+        # Construir filtro para Qdrant
+        filter_conditions = []
+        
+        if rule_id:
+            filter_conditions.append(
+                models.FieldCondition(
+                    key="id",
+                    match=models.MatchValue(value=rule_id)
+                )
+            )
+        
+        if machine:
+            filter_conditions.append(
+                models.FieldCondition(
+                    key="machines",
+                    match=models.MatchAny(any=[machine])
+                )
+            )
+
+        scroll_filter = models.Filter(must=filter_conditions) if filter_conditions else None
+
+        # Obtener reglas de Qdrant
+        rules = qdrant_client.scroll(
+            collection_name="custom_rules",
+            scroll_filter=scroll_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        # Formatear resultados
+        formatted_rules = []
+        for rule in rules[0]:
+            formatted_rules.append({
+                "id": rule.id,
+                "machines": rule.payload.get("machines", []),
+                "key_figures": rule.payload.get("key_figures", {}),
+                "operator": rule.payload.get("operator", ""),
+                "unit": rule.payload.get("unit", ""),
+                "description": rule.payload.get("description", ""),
+                "created_at": rule.payload.get("created_at", ""),
+                "applies_to": f"{len(rule.payload.get('machines', []))} máquina(s)",
+                "metrics": list(rule.payload.get("key_figures", {}).keys())
+            })
+
+        return json.dumps({
+            "status": "success",
+            "count": len(formatted_rules),
+            "rules": formatted_rules,
+            "metadata": {
+                "collection": "custom_rules",
+                "limit": limit,
+                "filters": {
+                    "by_id": bool(rule_id),
+                    "by_machine": machine if machine else None
+                }
+            }
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Error listing rules: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "rules": []
+        }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def delete_custom_rule(
+    ctx: Context,
+    rule_id: str
+) -> str:
+    """Elimina una regla personalizada por su ID.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        rule_id (str): ID de la regla a eliminar.
+
+    Returns:
+        str: JSON con estado de la operación.
+
+    Ejemplo de uso LLM:
+        ```json
+        {"rule_id": "a1b2c3d4"}
+        ```
+    """
+    try:
+        # Verificar si existe la regla
+        existing = qdrant_client.retrieve(
+            collection_name="custom_rules",
+            ids=[rule_id],
+            with_payload=True
+        )
+
+        if not existing:
+            return json.dumps({
+                "status": "error",
+                "message": f"Regla con ID {rule_id} no encontrada"
+            }, ensure_ascii=False)
+
+        # Eliminar la regla
+        qdrant_client.delete(
+            collection_name="custom_rules",
+            points_selector=models.PointIdsList(
+                points=[rule_id]
+            )
+        )
+
+        # Obtener detalles para mensaje
+        rule_data = existing[0].payload
+        metrics = list(rule_data.get("key_figures", {}).keys())
+        machines = rule_data.get("machines", [])
+
+        return json.dumps({
+            "status": "success",
+            "message": f"Regla eliminada: {', '.join(metrics)} para {len(machines)} máquina(s)",
+            "deleted_rule": {
+                "id": rule_id,
+                "affected_machines": machines,
+                "metrics": metrics,
+                "operator": rule_data.get("operator", ""),
+                "description": rule_data.get("description", "")
+            }
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Error deleting rule {rule_id}: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "rule_id": rule_id
+        }, ensure_ascii=False)
+
+
+        
 @mcp.tool()
 async def analyze_compliance(
     ctx: Context,
@@ -758,18 +859,6 @@ async def analyze_compliance(
                     "unknown: No rule defined"
                 ]
             }
-
-    Raises:
-        Exception: Si falla la validación, la obtención de datos, o el análisis.
-                  Devuelve un JSON con status="error" y el mensaje de error.
-
-    Ejemplo de uso:
-        await analyze_compliance(
-            ctx,
-            key_values={"machine": "ModelA", "start_date": "2025-04-09", "end_date": "2025-04-11"},
-            key_figures=["temperature"]
-        )
-        # Analiza el cumplimiento de los datos de ModelA para el rango de fechas especificado.
     """
     try:
         key_values = key_values or {}
