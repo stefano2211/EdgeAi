@@ -627,6 +627,171 @@ async def add_custom_rule(
                 "description": description
             }
         }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_custom_rules(
+    ctx: Context,
+    rule_id: Optional[str] = None,
+    machine: Optional[str] = None,
+    limit: int = 10
+) -> str:
+    """Lista todas las reglas personalizadas o filtra por ID/máquina.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        rule_id (Optional[str]): ID específico de la regla a buscar.
+        machine (Optional[str]): Nombre de máquina para filtrar reglas.
+        limit (int): Límite de resultados a devolver (default: 10).
+
+    Returns:
+        str: JSON con lista de reglas y sus metadatos.
+
+    Ejemplo de uso LLM:
+        ```json
+        {"rule_id": "a1b2c3d4"}
+        ```
+        o
+        ```json
+        {"machine": "ModelA", "limit": 5}
+        ```
+    """
+    try:
+        # Construir filtro para Qdrant
+        filter_conditions = []
+        
+        if rule_id:
+            filter_conditions.append(
+                models.FieldCondition(
+                    key="id",
+                    match=models.MatchValue(value=rule_id)
+                )
+            )
+        
+        if machine:
+            filter_conditions.append(
+                models.FieldCondition(
+                    key="machines",
+                    match=models.MatchAny(any=[machine])
+                )
+            )
+
+        scroll_filter = models.Filter(must=filter_conditions) if filter_conditions else None
+
+        # Obtener reglas de Qdrant
+        rules = qdrant_client.scroll(
+            collection_name="custom_rules",
+            scroll_filter=scroll_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        # Formatear resultados
+        formatted_rules = []
+        for rule in rules[0]:
+            formatted_rules.append({
+                "id": rule.id,
+                "machines": rule.payload.get("machines", []),
+                "key_figures": rule.payload.get("key_figures", {}),
+                "operator": rule.payload.get("operator", ""),
+                "unit": rule.payload.get("unit", ""),
+                "description": rule.payload.get("description", ""),
+                "created_at": rule.payload.get("created_at", ""),
+                "applies_to": f"{len(rule.payload.get('machines', []))} máquina(s)",
+                "metrics": list(rule.payload.get("key_figures", {}).keys())
+            })
+
+        return json.dumps({
+            "status": "success",
+            "count": len(formatted_rules),
+            "rules": formatted_rules,
+            "metadata": {
+                "collection": "custom_rules",
+                "limit": limit,
+                "filters": {
+                    "by_id": bool(rule_id),
+                    "by_machine": machine if machine else None
+                }
+            }
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Error listing rules: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "rules": []
+        }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def delete_custom_rule(
+    ctx: Context,
+    rule_id: str
+) -> str:
+    """Elimina una regla personalizada por su ID.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        rule_id (str): ID de la regla a eliminar.
+
+    Returns:
+        str: JSON con estado de la operación.
+
+    Ejemplo de uso LLM:
+        ```json
+        {"rule_id": "a1b2c3d4"}
+        ```
+    """
+    try:
+        # Verificar si existe la regla
+        existing = qdrant_client.retrieve(
+            collection_name="custom_rules",
+            ids=[rule_id],
+            with_payload=True
+        )
+
+        if not existing:
+            return json.dumps({
+                "status": "error",
+                "message": f"Regla con ID {rule_id} no encontrada"
+            }, ensure_ascii=False)
+
+        # Eliminar la regla
+        qdrant_client.delete(
+            collection_name="custom_rules",
+            points_selector=models.PointIdsList(
+                points=[rule_id]
+            )
+        )
+
+        # Obtener detalles para mensaje
+        rule_data = existing[0].payload
+        metrics = list(rule_data.get("key_figures", {}).keys())
+        machines = rule_data.get("machines", [])
+
+        return json.dumps({
+            "status": "success",
+            "message": f"Regla eliminada: {', '.join(metrics)} para {len(machines)} máquina(s)",
+            "deleted_rule": {
+                "id": rule_id,
+                "affected_machines": machines,
+                "metrics": metrics,
+                "operator": rule_data.get("operator", ""),
+                "description": rule_data.get("description", "")
+            }
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Error deleting rule {rule_id}: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "rule_id": rule_id
+        }, ensure_ascii=False)
+
+
         
 @mcp.tool()
 async def analyze_compliance(
