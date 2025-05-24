@@ -445,7 +445,8 @@ async def add_custom_rule(
         key_values (Optional[Dict[str, str]]): Filtros categóricos.
             Ejemplo: {"operation_mode": "Auto", "product_type": "WidgetA"}
         operator (str): Operador de comparación (>=, <=, >, <, ==, !=).
-        unit (Optional[str]): Unidad de medida común para todas las métricas.
+        unit (Optional[str]): Unidad de medida común para todas las métricas 
+            Ejemplo:'["bar"]'
         description (str): Descripción de la regla.
 
     Returns:
@@ -459,15 +460,6 @@ async def add_custom_rule(
             "operator": "<=",
             "unit": "bar",
             "description": "Límite de presión máximo"
-        }
-        ```
-        o
-        ```json
-        {
-            "machines": ["EquipA", "EquipB"],
-            "key_figures": "pressure=50,temperature=70",
-            "operator": "<=",
-            "description": "Límites superiores"
         }
         ```
     """
@@ -661,18 +653,6 @@ async def list_custom_rules(
         rule_id (Optional[str]): ID específico de la regla a buscar.
         machine (Optional[str]): Nombre de máquina para filtrar reglas.
         limit (int): Límite de resultados a devolver (default: 10).
-
-    Returns:
-        str: JSON con lista de reglas y sus metadatos.
-
-    Ejemplo de uso LLM:
-        ```json
-        {"rule_id": "a1b2c3d4"}
-        ```
-        o
-        ```json
-        {"machine": "ModelA", "limit": 5}
-        ```
     """
     try:
         # Construir filtro para Qdrant
@@ -752,14 +732,6 @@ async def delete_custom_rule(
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         rule_id (str): ID de la regla a eliminar.
-
-    Returns:
-        str: JSON con estado de la operación.
-
-    Ejemplo de uso LLM:
-        ```json
-        {"rule_id": "a1b2c3d4"}
-        ```
     """
     try:
         # Verificar si existe la regla
@@ -814,7 +786,67 @@ async def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas."""
+    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
+
+    Esta herramienta realiza las siguientes acciones:
+    1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
+    2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data.
+    3. Carga reglas SOP y personalizadas para las máquinas relevantes.
+    4. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
+    5. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
+    6. Devuelve un informe detallado con resultados de cumplimiento.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
+            para filtrar (Example, {"equipment_id": "EquipA", "operation_mode": "Auto", "product_type":"WidgetC", "status":"Running","start_date": "2025-04-09",
+            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
+        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
+            (Example, ["pressure", "uptime"]).
+
+    Returns:
+        str: Cadena JSON con el estado, período, filtro de máquina, métricas analizadas,
+            resultados del análisis, cobertura de reglas, y notas.
+            Ejemplo:
+            {
+                "status": "success",
+                "period": "2025-04-09 to 2025-04-11",
+                "machine_filter": "ModelA",
+                "metrics_analyzed": ["temperature"],
+                "results": [
+                    {
+                        "id": 1,
+                        "date": "2025-04-10",
+                        "machine": "ModelA",
+                        "metrics": {"temperature": 75.0},
+                        "compliance": {
+                            "temperature": {
+                                "sop": {"value": 75.0, "rule": "<= 80.0°C", "status": "compliant"},
+                                "custom": [
+                                    {
+                                        "value": 75.0,
+                                        "rule": "<= 78.0°C",
+                                        "status": "compliant",
+                                        "description": "Temperatura máxima por experiencia",
+                                        "filters": {"material": "Steel"}
+                                    }
+                                ]
+                            }
+                        },
+                        "compliance_percentage": 100.0
+                    }
+                ],
+                "sop_coverage": "1/1 machines with SOP",
+                "custom_rules_applied": "1/1 machines with custom rules",
+                "analysis_notes": [
+                    "sop: Rules from Standard Operating Procedures",
+                    "custom: User-defined expert rules",
+                    "compliant: Meets rule requirement",
+                    "non_compliant: Does not meet rule requirement",
+                    "unknown: No rule defined"
+                ]
+            }
+    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
