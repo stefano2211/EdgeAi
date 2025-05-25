@@ -761,24 +761,7 @@ async def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
-
-    Esta herramienta realiza las siguientes acciones:
-    1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
-    2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data.
-    3. Carga reglas SOP y personalizadas para las máquinas relevantes.
-    4. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
-    5. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
-    6. Devuelve un informe detallado con resultados de cumplimiento.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Example, {"machine": "ModelA", "material": "Steel", "production_line":"Line1", "start_date": "2025-04-09",
-            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
-        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (Example, ["temperature", "uptime"]).
-    """
+    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas."""
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
