@@ -112,29 +112,6 @@ def init_infrastructure():
         logger.error(f"Infrastructure initialization failed: {str(e)}")
         raise
 
-# Recursos para datos de la API
-@mcp.resource("api://machines/{machine}")
-async def get_machine_data(machine: str) -> str:
-    """Obtiene datos de una máquina específica desde la API."""
-    try:
-        response = await auth_client.get(f"/machines/{machine}")
-        response.raise_for_status()
-        return json.dumps(response.json(), ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
-
-# Recursos para PDFs en MinIO
-@mcp.resource("minio://sop-pdfs/{machine}.pdf")
-async def get_sop_pdf(machine: str) -> bytes:
-    """Obtiene el PDF de un SOP desde MinIO."""
-    try:
-        response = minio_client.get_object(MINIO_BUCKET, f"{machine}.pdf")
-        data = response.read()
-        response.close()
-        response.release_conn()
-        return data
-    except S3Error as e:
-        raise ValueError(f"PDF no encontrado para {machine}: {str(e)}")
 
 class DataValidator:
     """Valida key_figures y key_values contra la estructura de datos de la API."""
@@ -204,8 +181,6 @@ async def list_fields(ctx: Context) -> str:
         key_values = {}
         
         for field, value in sample.items():
-            if field == "id":
-                continue
             if isinstance(value, (int, float)):
                 key_figures.append(field)
             elif isinstance(value, str):
@@ -242,32 +217,33 @@ async def fetch_mes_data(
         fields_info = await DataValidator.validate_fields(ctx, key_figures, key_values)
         valid_values = fields_info["key_values"]
         
-        # Determinar el campo identificador
+        # Seleccionar identificador dinámicamente
         identifier_field = None
         identifier_value = None
-        for field in valid_values:
-            if field == "machine":
-                identifier_field = field
-                identifier_value = key_values.get(field)
-                break
-        if not identifier_field:
-            for field in valid_values:
-                if field not in ["start_date", "end_date", "date"]:
+        if key_values:
+            for field in key_values:
+                if field in valid_values:
                     identifier_field = field
-                    identifier_value = key_values.get(field)
+                    identifier_value = key_values[field]
                     break
-        
-        # Verificar en Qdrant
+        if not identifier_field and valid_values:
+            identifier_field = next(iter(valid_values))
+            identifier_value = key_values.get(identifier_field)
+
+        # Construir condiciones para Qdrant
         must_conditions = []
         if identifier_field and identifier_value:
             must_conditions.append(models.FieldCondition(key=identifier_field, match=models.MatchValue(value=identifier_value)))
         if "start_date" in key_values and "end_date" in key_values:
             must_conditions.append(models.FieldCondition(
                 key="date",
-                match=models.MatchText(text=f"[{key_values['start_date']} TO {key_values['end_date']}]")
+                range=models.Range(
+                    gte=datetime.strptime(key_values["start_date"], "%Y-%m-%d").timestamp(),
+                    lte=datetime.strptime(key_values["end_date"], "%Y-%m-%d").timestamp()
+                )
             ))
         for k, v in key_values.items():
-            if k not in [identifier_field, "start_date", "end_date"]:
+            if k != identifier_field and k not in ["start_date", "end_date"]:
                 must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
 
         qdrant_results = qdrant_client.scroll(
@@ -278,7 +254,7 @@ async def fetch_mes_data(
 
         processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
 
-        # Si no hay datos en Qdrant, intentar usar recurso
+        # Si no hay datos en Qdrant, obtener de la API
         if not processed_data:
             params = {}
             if "start_date" in key_values and "end_date" in key_values:
@@ -288,29 +264,19 @@ async def fetch_mes_data(
                 })
             data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
 
-            try:
-                # Intentar usar recurso
-                resource_uri = f"api://machines/{identifier_value}" if identifier_field and identifier_value else "api://machines/all"
-                resource = await ctx.get_resource(resource_uri)
-                data = json.loads(resource.read().decode())
-            except AttributeError as e:
-                # Fallback a solicitud directa si get_resource no está disponible
-                logger.warning(f"ctx.get_resource no disponible, usando solicitud directa: {str(e)}")
-                endpoint = f"/machines/{identifier_value}" if identifier_field and identifier_value else "/machines/"
-                response = await auth_client.get(endpoint, params=params)
-                response.raise_for_status()
-                data = response.json()
+            # Solicitud directa a la API
+            endpoint = f"/machines/{identifier_value}" if identifier_field and identifier_value else "/machines/"
+            response = await auth_client.get(endpoint, params=params)
+            response.raise_for_status()
+            data = response.json()
 
-            # Filtrar y procesar registros
+            # Procesar registros dinámicamente
             processed_data = []
             for record in data:
-                if all(record.get(k) == v for k, v in data_filters.items() if k != identifier_field):
-                    item = {
-                        "id": record["id"],
-                        "date": record["date"],
-                        identifier_field: record[identifier_field] if identifier_field else None
-                    }
-                    item.update({f: record[f] for f in key_figures if f in record})
+                if all(record.get(k) == v for k, v in data_filters.items()):
+                    item = {k: record[k] for k in record if k in key_figures or k in key_values}
+                    if identifier_field and identifier_field in record:
+                        item[identifier_field] = record[identifier_field]
                     processed_data.append(item)
 
             # Almacenar en Qdrant
@@ -357,28 +323,19 @@ async def load_sop(ctx: Context, machine: str) -> str:
                 "rules": existing[0][0].payload["rules"]
             }, ensure_ascii=False)
 
-        # Intentar cargar PDF como recurso
+        # Cargar PDF directamente desde MinIO
         try:
-            resource_uri = f"minio://sop-pdfs/{machine}.pdf"
-            resource = await ctx.get_resource(resource_uri)
-            if resource.content_type != "application/pdf":
-                raise ValueError("El recurso debe ser un PDF")
-            pdf_data = resource.read()
-        except (AttributeError, ValueError) as e:
-            # Fallback a carga directa desde MinIO
-            logger.warning(f"ctx.get_resource no disponible o inválido, usando MinIO directo: {str(e)}")
-            try:
-                response = minio_client.get_object(MINIO_BUCKET, f"{machine}.pdf")
-                pdf_data = response.read()
-                response.close()
-                response.release_conn()
-            except S3Error as e:
-                available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
-                return json.dumps({
-                    "status": "error",
-                    "message": f"PDF no encontrado para {machine}. SOPs disponibles: {', '.join(available_pdfs)}",
-                    "machine": machine
-                }, ensure_ascii=False)
+            response = minio_client.get_object(MINIO_BUCKET, f"{machine}.pdf")
+            pdf_data = response.read()
+            response.close()
+            response.release_conn()
+        except S3Error as e:
+            available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
+            return json.dumps({
+                "status": "error",
+                "message": f"PDF no encontrado para {machine}. SOPs disponibles: {', '.join(available_pdfs)}",
+                "machine": machine
+            }, ensure_ascii=False)
 
         # Extraer texto del PDF
         with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
@@ -629,14 +586,7 @@ async def list_custom_rules(
     machine: Optional[str] = None,
     limit: int = 10
 ) -> str:
-    """Lista todas las reglas personalizadas o filtra por ID/máquina.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        rule_id (Optional[str]): ID específico de la regla a buscar.
-        machine (Optional[str]): Nombre de máquina para filtrar reglas.
-        limit (int): Límite de resultados a devolver (default: 10).
-    """
+    """Lista todas las reglas personalizadas o filtra por ID/máquina."""
     try:
         filter_conditions = []
         if rule_id:
@@ -705,12 +655,7 @@ async def delete_custom_rule(
     ctx: Context,
     rule_id: str
 ) -> str:
-    """Elimina una regla personalizada por su ID.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        rule_id (str): ID de la regla a eliminar.
-    """
+    """Elimina una regla personalizada por su ID."""
     try:
         existing = qdrant_client.retrieve(
             collection_name="custom_rules",
@@ -761,7 +706,24 @@ async def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas."""
+    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
+
+    Esta herramienta realiza las siguientes acciones:
+    1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
+    2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data.
+    3. Carga reglas SOP y personalizadas para las máquinas relevantes.
+    4. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
+    5. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
+    6. Devuelve un informe detallado con resultados de cumplimiento.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
+            para filtrar (Example, {"machine": "ModelA", "material": "Steel", "production_line":"Line1", "start_date": "2025-04-09",
+            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
+        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
+            (Example, ["temperature", "uptime"]).
+    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
@@ -770,21 +732,19 @@ async def analyze_compliance(
         fields_info = await DataValidator.validate_fields(ctx, key_figures, key_values)
         valid_values = fields_info["key_values"]
         
-        # Determinar el campo identificador
+        # Seleccionar identificador dinámicamente
         identifier_field = None
         identifier_value = None
-        for field in valid_values:
-            if field == "machine":
-                identifier_field = field
-                identifier_value = key_values.get(field)
-                break
-        if not identifier_field:
-            for field in valid_values:
-                if field not in ["start_date", "end_date", "date"]:
+        if key_values:
+            for field in key_values:
+                if field in valid_values:
                     identifier_field = field
-                    identifier_value = key_values.get(field)
+                    identifier_value = key_values[field]
                     break
-        
+        if not identifier_field and valid_values:
+            identifier_field = next(iter(valid_values))
+            identifier_value = key_values.get(identifier_field)
+
         # Obtener datos de manufactura
         fetch_result = json.loads(await fetch_mes_data(ctx, key_values, key_figures))
         if fetch_result["status"] != "success":
@@ -795,7 +755,7 @@ async def analyze_compliance(
             }, ensure_ascii=False)
 
         # Cargar reglas SOP para las máquinas relevantes
-        machines = {r[identifier_field] for r in fetch_result["data"] if identifier_field}
+        machines = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
         machine_rules = {}
         for machine in machines:
             sop_result = json.loads(await load_sop(ctx, machine))
@@ -803,26 +763,26 @@ async def analyze_compliance(
 
         # Cargar reglas personalizadas desde Qdrant
         custom_rules = []
-        custom_result = qdrant_client.scroll(
-            collection_name="custom_rules",
-            scroll_filter=models.Filter(must=[
-                models.FieldCondition(key="machines", match=models.MatchAny(any=list(machines)))
-            ]),
-            limit=100
-        )
-        custom_rules = [r.payload for r in custom_result[0]] if custom_result[0] else []
+        if machines:
+            custom_result = qdrant_client.scroll(
+                collection_name="custom_rules",
+                scroll_filter=models.Filter(must=[
+                    models.FieldCondition(key="machines", match=models.MatchAny(any=list(machines)))
+                ]),
+                limit=100
+            )
+            custom_rules = [r.payload for r in custom_result[0]] if custom_result[0] else []
 
         # Analizar cumplimiento para cada registro
         results = []
         for record in fetch_result["data"]:
             analysis = {
-                "id": record["id"],
-                "date": record["date"],
-                "machine": record[identifier_field] if identifier_field else None,
                 "metrics": {f: record[f] for f in key_figures if f in record},
                 "compliance": {},
                 "compliance_percentage": 0.0
             }
+            if identifier_field and identifier_field in record:
+                analysis[identifier_field] = record[identifier_field]
             
             compliant = 0
             total = 0
@@ -835,7 +795,8 @@ async def analyze_compliance(
                 compliance_info = {}
                 
                 # Verificar regla SOP
-                sop_rules = machine_rules.get(record[identifier_field] if identifier_field else "", {})
+                machine = record.get(identifier_field) if identifier_field else None
+                sop_rules = machine_rules.get(machine, {}) if machine else {}
                 if field in sop_rules:
                     rule = sop_rules[field]
                     value = record[field]
@@ -859,7 +820,7 @@ async def analyze_compliance(
                 for rule in custom_rules:
                     if field not in rule["key_figures"]:
                         continue
-                    if identifier_field and record[identifier_field] not in rule["machines"]:
+                    if identifier_field and record.get(identifier_field) not in rule["machines"]:
                         continue
                     if rule["key_values"]:
                         if not all(record.get(k) == v for k, v in rule["key_values"].items()):
@@ -912,18 +873,12 @@ async def analyze_compliance(
         return json.dumps({
             "status": "success",
             "period": period,
-            "machine_filter": identifier_value if identifier_value else "all machines",
+            "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
             "metrics_analyzed": key_figures,
             "results": results,
-            "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP",
-            "custom_rules_applied": f"{len(custom_rules)} custom rules applied",
-            "analysis_notes": [
-                "sop: Reglas de Procedimientos Operativos Estándar",
-                "custom: Reglas definidas por el usuario",
-                "compliant: Cumple con el requisito",
-                "non_compliant: No cumple con el requisito",
-                "unknown: No hay regla definida"
-            ]
+            "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP" if machines else "N/A",
+            "custom_rules_applied": len(custom_rules),
+            "analysis_notes": []
         }, ensure_ascii=False)
 
     except Exception as e:
