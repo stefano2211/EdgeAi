@@ -113,6 +113,7 @@ def init_infrastructure():
         raise
 
 
+
 class DataValidator:
     """Valida key_figures y key_values contra la estructura de datos de la API."""
     
@@ -159,6 +160,115 @@ class DataValidator:
         except Exception as e:
             logger.error(f"Validación de campos falló: {str(e)}")
             raise
+
+async def load_sop(machine: str) -> Dict:
+    """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO, devolviendo reglas de cumplimiento."""
+    try:
+        # Verificar si ya existe en Qdrant
+        existing = qdrant_client.scroll(
+            collection_name="sop_pdfs",
+            scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
+            limit=1
+        )
+        
+        if existing[0]:
+            return existing[0][0].payload.get("rules", {})
+
+        # Cargar PDF directamente desde MinIO
+        try:
+            response = minio_client.get_object(MINIO_BUCKET, f"{machine}.pdf")
+            pdf_data = response.read()
+            response.close()
+            response.release_conn()
+        except S3Error:
+            logger.warning(f"PDF no encontrado para {machine}")
+            return {}
+
+        # Extraer texto del PDF
+        with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
+            content = "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+        # Extraer reglas de cumplimiento
+        rules = {}
+        patterns = [
+            (r"(?P<field>uptime|tiempo de actividad)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*%", ">=", "%"),
+            (r"(?P<field>temperature|temperatura)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*°C", "<=", "°C"),
+            (r"(?P<field>vibration|vibración)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*mm/s", "<=", "mm/s"),
+            (r"(?P<field>defects|defectos)\s*(?P<operator><=|≤)\s*(?P<value>\d+)", "<=", "")
+        ]
+
+        for pattern, default_op, unit in patterns:
+            for match in re.finditer(pattern, content, re.IGNORECASE):
+                try:
+                    field = match.group("field").lower().replace(" ", "_")
+                    rules[field] = {
+                        "value": float(match.group("value")),
+                        "operator": match.group("operator") or default_op,
+                        "unit": unit,
+                        "source_text": match.group(0)
+                    }
+                except Exception:
+                    continue
+
+        # Almacenar en Qdrant si hay reglas
+        if rules:
+            embedding = model.encode(content).tolist()
+            qdrant_client.upsert(
+                collection_name="sop_pdfs",
+                points=[models.PointStruct(
+                    id=hashlib.md5(machine.encode()).hexdigest(),
+                    vector=embedding,
+                    payload={
+                        "machine": machine,
+                        "filename": f"{machine}.pdf",
+                        "rules": rules
+                    }
+                )]
+            )
+
+        return rules
+
+    except Exception as e:
+        logger.error(f"Procesamiento de SOP falló para {machine}: {str(e)}")
+        return {}
+
+@mcp.tool()
+async def get_pdf_content(ctx: Context, filename: str) -> str:
+    """Extrae y devuelve el contenido de texto de un PDF almacenado en MinIO."""
+    try:
+        # Cargar PDF desde MinIO
+        try:
+            response = minio_client.get_object(MINIO_BUCKET, filename)
+            pdf_data = response.read()
+            response.close()
+            response.release_conn()
+        except S3Error as e:
+            available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
+            return json.dumps({
+                "status": "error",
+                "message": f"PDF no encontrado: {filename}. PDFs disponibles: {', '.join(available_pdfs)}",
+                "filename": filename,
+                "content": ""
+            }, ensure_ascii=False)
+
+        # Extraer texto del PDF
+        with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
+            content = "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+        return json.dumps({
+            "status": "success",
+            "filename": filename,
+            "content": content
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"Error al extraer contenido de {filename}: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "filename": filename,
+            "content": ""
+        }, ensure_ascii=False)
 
 @mcp.tool()
 async def list_fields(ctx: Context) -> str:
@@ -303,101 +413,6 @@ async def fetch_mes_data(
             "message": str(e),
             "count": 0,
             "data": []
-        }, ensure_ascii=False)
-
-@mcp.tool()
-async def load_sop(ctx: Context, machine: str) -> str:
-    """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO."""
-    try:
-        # Verificar si ya existe en Qdrant
-        existing = qdrant_client.scroll(
-            collection_name="sop_pdfs",
-            scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
-            limit=1
-        )
-        
-        if existing[0]:
-            return json.dumps({
-                "status": "exists",
-                "machine": machine,
-                "rules": existing[0][0].payload["rules"]
-            }, ensure_ascii=False)
-
-        # Cargar PDF directamente desde MinIO
-        try:
-            response = minio_client.get_object(MINIO_BUCKET, f"{machine}.pdf")
-            pdf_data = response.read()
-            response.close()
-            response.release_conn()
-        except S3Error as e:
-            available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
-            return json.dumps({
-                "status": "error",
-                "message": f"PDF no encontrado para {machine}. SOPs disponibles: {', '.join(available_pdfs)}",
-                "machine": machine
-            }, ensure_ascii=False)
-
-        # Extraer texto del PDF
-        with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
-            content = "\n".join(page.extract_text() or "" for page in pdf.pages)
-
-        # Extraer reglas de cumplimiento
-        rules = {}
-        patterns = [
-            (r"(?P<field>uptime|tiempo de actividad)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*%", ">=", "%"),
-            (r"(?P<field>temperature|temperatura)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*°C", "<=", "°C"),
-            (r"(?P<field>vibration|vibración)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*mm/s", "<=", "mm/s"),
-            (r"(?P<field>defects|defectos)\s*(?P<operator><=|≤)\s*(?P<value>\d+)", "<=", "")
-        ]
-
-        for pattern, default_op, unit in patterns:
-            for match in re.finditer(pattern, content, re.IGNORECASE):
-                try:
-                    field = match.group("field").lower().replace(" ", "_")
-                    rules[field] = {
-                        "value": float(match.group("value")),
-                        "operator": match.group("operator") or default_op,
-                        "unit": unit,
-                        "source_text": match.group(0)
-                    }
-                except Exception:
-                    continue
-
-        if not rules:
-            return json.dumps({
-                "status": "error",
-                "message": "No se encontraron reglas de cumplimiento en el documento",
-                "machine": machine
-            }, ensure_ascii=False)
-
-        # Almacenar en Qdrant
-        embedding = model.encode(content).tolist()
-        qdrant_client.upsert(
-            collection_name="sop_pdfs",
-            points=[models.PointStruct(
-                id=hashlib.md5(machine.encode()).hexdigest(),
-                vector=embedding,
-                payload={
-                    "machine": machine,
-                    "filename": f"{machine}.pdf",
-                    "rules": rules
-                }
-            )]
-        )
-
-        return json.dumps({
-            "status": "success",
-            "machine": machine,
-            "rules": rules
-        }, ensure_ascii=False)
-
-    except Exception as e:
-        logger.error(f"Procesamiento de SOP falló para {machine}: {str(e)}")
-        available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
-        return json.dumps({
-            "status": "error",
-            "message": f"Error procesando SOP: {str(e)}. SOPs disponibles: {', '.join(available_pdfs)}",
-            "machine": machine
         }, ensure_ascii=False)
 
 @mcp.tool()
@@ -719,7 +734,7 @@ async def analyze_compliance(
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Example, {"machine": "ModelA", "material": "Steel", "production_line":"Line1", "start_date": "2025-04-09",
+            para filtrar (Example, {"machine": "ModelA", "production_line":"Line1", "start_date": "2025-04-09",
             "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
         key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
             (Example, ["temperature", "uptime"]).
@@ -758,8 +773,7 @@ async def analyze_compliance(
         machines = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
         machine_rules = {}
         for machine in machines:
-            sop_result = json.loads(await load_sop(ctx, machine))
-            machine_rules[machine] = sop_result.get("rules", {}) if sop_result["status"] in ["success", "exists"] else {}
+            machine_rules[machine] = await load_sop(machine)
 
         # Cargar reglas personalizadas desde Qdrant
         custom_rules = []
