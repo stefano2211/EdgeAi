@@ -827,53 +827,6 @@ def analyze_compliance(
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Example, {"equipment_id": "EquipA", "operation_mode": "Auto", "product_type":"WidgetC", "status":"Running","start_date": "2025-04-09",
-            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
-        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (Example, ["pressure", "uptime"]).
-
-    Returns:
-        str: Cadena JSON con el estado, período, filtro de máquina, métricas analizadas,
-            resultados del análisis, cobertura de reglas, y notas.
-            Ejemplo:
-            {
-                "status": "success",
-                "period": "2025-04-09 to 2025-04-11",
-                "machine_filter": "ModelA",
-                "metrics_analyzed": ["temperature"],
-                "results": [
-                    {
-                        "id": 1,
-                        "date": "2025-04-10",
-                        "machine": "ModelA",
-                        "metrics": {"temperature": 75.0},
-                        "compliance": {
-                            "temperature": {
-                                "sop": {"value": 75.0, "rule": "<= 80.0°C", "status": "compliant"},
-                                "custom": [
-                                    {
-                                        "value": 75.0,
-                                        "rule": "<= 78.0°C",
-                                        "status": "compliant",
-                                        "description": "Temperatura máxima por experiencia",
-                                        "filters": {"material": "Steel"}
-                                    }
-                                ]
-                            }
-                        },
-                        "compliance_percentage": 100.0
-                    }
-                ],
-                "sop_coverage": "1/1 machines with SOP",
-                "custom_rules_applied": "1/1 machines with custom rules",
-                "analysis_notes": [
-                    "sop: Rules from Standard Operating Procedures",
-                    "custom: User-defined expert rules",
-                    "compliant: Meets rule requirement",
-                    "non_compliant: Does not meet rule requirement",
-                    "unknown: No rule defined"
-                ]
-            }
             para filtrar (Example, {"machine": "ModelA", "production_line":"Line1", "start_date": "2025-04-09",
             "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
         key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
