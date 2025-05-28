@@ -15,44 +15,50 @@ from minio.error import S3Error
 import pdfplumber
 import io
 import os
+import spacy
+from spacy.language import Language
+from spacy.tokens import Span
 
-# Initialize MCP service
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    import subprocess
+    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+    nlp = spacy.load("en_core_web_sm")
+
 mcp = FastMCP("Manufacturing Compliance Processor")
 
-# Global configuration
 API_URL = os.getenv("API_URL", "http://api:5000")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "sop-pdfs")
-API_USERNAME = os.getenv("API_USERNAME", "admin")
-API_PASSWORD = os.getenv("API_PASSWORD", "password123")
+API_USERNAME = "admin"
+API_PASSWORD = "password123"
 
-# Component initialization
 model = SentenceTransformer('all-MiniLM-L6-v2')
 qdrant_client = QdrantClient(host="qdrant", port=6333)
-minio_client = Minio(MINIO_ENDPOINT, 
-                    access_key=MINIO_ACCESS_KEY, 
-                    secret_key=MINIO_SECRET_KEY, 
-                    secure=False)
+minio_client = Minio(
+    MINIO_ENDPOINT,
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=False
+)
 
-# Logging configuration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class AuthClient:
-    """Cliente HTTP para manejar autenticación y solicitudes autenticadas a la API."""
     def __init__(self, base_url: str, username: str, password: str):
         self.base_url = base_url
         self.username = username
         self.password = password
-        self.client = httpx.AsyncClient()
+        self.client = httpx.Client()
         self.token = None
 
-    async def authenticate(self):
-        """Autentica contra la API y obtiene un token de sesión."""
+    def authenticate(self):
         try:
-            response = await self.client.post(
+            response = self.client.post(
                 f"{self.base_url}/login",
                 json={"username": self.username, "password": self.password}
             )
@@ -64,23 +70,22 @@ class AuthClient:
             logger.error(f"Fallo en autenticación: {str(e)}")
             raise ValueError(f"No se pudo autenticar: {str(e)}")
 
-    async def get(self, endpoint: str, params: Optional[Dict] = None) -> httpx.Response:
-        """Realiza una solicitud GET autenticada a la API."""
+    def get(self, endpoint: str, params: Optional[Dict] = None) -> httpx.Response:
         if not self.token:
-            await self.authenticate()
+            self.authenticate()
         
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
-            response = await self.client.get(
+            response = self.client.get(
                 f"{self.base_url}{endpoint}",
                 headers=headers,
                 params=params
             )
             if response.status_code == 401:
                 logger.info("Token inválido, reautenticando...")
-                await self.authenticate()
+                self.authenticate()
                 headers = {"Authorization": f"Bearer {self.token}"}
-                response = await self.client.get(
+                response = self.client.get(
                     f"{self.base_url}{endpoint}",
                     headers=headers,
                     params=params
@@ -90,15 +95,12 @@ class AuthClient:
             logger.error(f"Error en solicitud GET: {str(e)}")
             raise
 
-    async def close(self):
-        """Cierra el cliente HTTP."""
-        await self.client.aclose()
+    def close(self):
+        self.client.close()
 
-# Cliente global
 auth_client = None
 
 def init_infrastructure():
-    """Inicializa la infraestructura del MCP, incluyendo Qdrant, MinIO y el cliente autenticado."""
     global auth_client
     try:
         vector_config = models.VectorParams(size=384, distance=models.Distance.COSINE)
@@ -113,33 +115,28 @@ def init_infrastructure():
         raise
 
 
-
 class DataValidator:
-    """Valida key_figures y key_values contra la estructura de datos de la API."""
-    
     @staticmethod
     def validate_date(date_str: str, field: str) -> None:
-        """Valida que una fecha tenga el formato YYYY-MM-DD."""
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
-            raise ValueError(f"Formato inválido para {field}. Use YYYY-MM-DD: {date_str}")
+            raise ValueError(f"Invalid format for {field}. Use YYYY-MM-DD: {date_str}")
 
     @staticmethod
-    async def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict[str, str]) -> Dict:
-        """Valida que los campos solicitados sean válidos según la estructura de la API."""
+    def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict[str, str]) -> Dict:
         try:
-            fields_info = json.loads(await list_fields(ctx))
+            fields_info = json.loads(list_fields(ctx))
             if fields_info["status"] != "success":
-                raise ValueError("No se pudo validar contra la API")
+                raise ValueError("Could not validate against API")
 
             if "start_date" in key_values or "end_date" in key_values:
                 if "start_date" not in key_values or "end_date" not in key_values:
-                    raise ValueError("Deben proporcionarse tanto start_date como end_date")
+                    raise ValueError("Both start_date and end_date must be provided")
                 DataValidator.validate_date(key_values["start_date"], "start_date")
                 DataValidator.validate_date(key_values["end_date"], "end_date")
                 if key_values["start_date"] > key_values["end_date"]:
-                    raise ValueError("start_date no puede ser posterior a end_date")
+                    raise ValueError("start_date cannot be later than end_date")
 
             invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
             invalid_values = {
@@ -151,20 +148,54 @@ class DataValidator:
             if invalid_figures or invalid_values:
                 errors = []
                 if invalid_figures:
-                    errors.append(f"Campos numéricos inválidos: {invalid_figures}")
+                    errors.append(f"Invalid numeric fields: {invalid_figures}")
                 if invalid_values:
-                    errors.append(f"Campos categóricos inválidos: {invalid_values}")
+                    errors.append(f"Invalid categorical fields: {invalid_values}")
                 raise ValueError(" | ".join(errors))
             
             return fields_info
         except Exception as e:
-            logger.error(f"Validación de campos falló: {str(e)}")
+            logger.error(f"Field validation failed: {str(e)}")
             raise
 
-async def load_sop(machine: str) -> Dict:
-    """Carga y procesa un documento SOP (PDF) para una máquina específica desde MinIO, devolviendo reglas de cumplimiento."""
+def detect_operator_between(param_end: int, value_start: int, sentence: str) -> str:
+    text_before = sentence[max(0, param_end - 10):value_start].lower()
+    operator_map = {
+        ">=": [">=", "≥", "greater than or equal", "at least"],
+        "<=": ["<=", "≤", "less than or equal", "at most"],
+        ">": [">", "greater than", "exceeds"],
+        "<": ["<", "less than", "below"],
+        "==": ["=", "==", "equals"],
+        "!=": ["!=", "not equal"]
+    }
+    for op_key, synonyms in operator_map.items():
+        for syn in synonyms:
+            if syn.lower() in text_before:
+                return op_key
+    logger.warning(f"No operator detected in '{text_before}', defaulting to >=")
+    return ">="
+
+def detect_unit_near(value_end: int, param: str, sentence: str) -> str:
+    known_units = {
+        "temperature": ["°C", "°F"],
+        "vibration": ["mm/s", "in/s"],
+        "uptime": ["%"],
+        "defects": [""],
+        "pressure": ["bar", "psi", "hPa"],
+        "humidity": ["%"],
+        "production_rate": ["/min", "/h"],
+        "throughput": ["/min", "/h"],
+        "inventory_level": [""]
+    }
+    text_after = sentence[value_end:value_end + 10].lower()
+    valid_units = known_units.get(param, ["%", "°C", "°F", "mm/s", "in/s", "bar", "psi", "hPa", "s", "min", "h", "m", "mm", "cm", "in", "ft"])
+    for unit in valid_units:
+        if unit.lower() in text_after:
+            return unit
+    return ""
+
+def load_sop(machine: str) -> Dict:
     try:
-        # Verificar si ya existe en Qdrant
         existing = qdrant_client.scroll(
             collection_name="sop_pdfs",
             scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
@@ -172,45 +203,117 @@ async def load_sop(machine: str) -> Dict:
         )
         
         if existing[0]:
+            logger.info(f"Rules found in Qdrant for {machine}")
             return existing[0][0].payload.get("rules", {})
 
-        # Cargar PDF directamente desde MinIO
         try:
             response = minio_client.get_object(MINIO_BUCKET, f"{machine}.pdf")
             pdf_data = response.read()
             response.close()
             response.release_conn()
         except S3Error:
-            logger.warning(f"PDF no encontrado para {machine}")
+            logger.warning(f"PDF not found for {machine}")
             return {}
 
-        # Extraer texto del PDF
         with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
             content = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-        # Extraer reglas de cumplimiento
-        rules = {}
-        patterns = [
-            (r"(?P<field>uptime|tiempo de actividad)\s*(?P<operator>>=|≥)\s*(?P<value>\d+\.\d+)\s*%", ">=", "%"),
-            (r"(?P<field>temperature|temperatura)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*°C", "<=", "°C"),
-            (r"(?P<field>vibration|vibración)\s*(?P<operator><=|≤)\s*(?P<value>\d+\.\d+)\s*mm/s", "<=", "mm/s"),
-            (r"(?P<field>defects|defectos)\s*(?P<operator><=|≤)\s*(?P<value>\d+)", "<=", "")
-        ]
+        content = content.replace("$<=$", "<=").replace("$>=$", ">=").replace(r"^{\circ}", "°").replace(r"\%", "%")
+        content = re.sub(r"\s+", " ", content).strip()
 
-        for pattern, default_op, unit in patterns:
-            for match in re.finditer(pattern, content, re.IGNORECASE):
-                try:
-                    field = match.group("field").lower().replace(" ", "_")
-                    rules[field] = {
-                        "value": float(match.group("value")),
-                        "operator": match.group("operator") or default_op,
-                        "unit": unit,
-                        "source_text": match.group(0)
-                    }
-                except Exception:
+        logger.info(f"Extracted text for {machine}: {content[:100]}...")
+
+        fields_info = json.loads(list_fields(Context()))
+        valid_fields = fields_info.get("key_figures", []) if fields_info.get("status") == "success" else []
+        logger.info(f"Valid fields from list_fields: {valid_fields}")
+
+        field_synonyms = {field: [field, field.replace("_", " ")] for field in valid_fields}
+        field_synonyms.update({
+            "uptime": ["uptime", "availability", "runtime"],
+            "temperature": ["temperature", "temp", "thermo"],
+            "vibration": ["vibration", "vib", "oscillation"],
+            "defects": ["defects", "defect", "rejections", "faults", "errors"],
+            "pressure": ["pressure", "press", "force"],
+            "humidity": ["humidity", "moisture", "hum"],
+            "production_rate": ["production rate", "output", "throughput"]
+        })
+
+        @Language.component("custom_ner")
+        def custom_ner(doc):
+            new_ents = []
+            for token in doc:
+                for field, synonyms in field_synonyms.items():
+                    if token.text.lower() in [s.lower() for s in synonyms]:
+                        new_ents.append(Span(doc, token.i, token.i + 1, label="PARAM"))
+                        break
+                if re.match(r"\d+\.?\d*", token.text):
+                    new_ents.append(Span(doc, token.i, token.i + 1, label="VALUE"))
+            doc.ents = new_ents
+            return doc
+
+        if "custom_ner" in nlp.pipe_names:
+            nlp.remove_pipe("custom_ner")
+        nlp.add_pipe("custom_ner", last=True)
+
+        rules = {}
+        doc = nlp(content)
+        sentences = list(doc.sents)
+
+        for sent in sentences:
+            entities = [(ent.text, ent.label_, ent.start_char, ent.end_char) for ent in sent.ents]
+            param_ents = [(text, start, end) for text, label, start, end in entities if label == "PARAM"]
+            value_ents = [(text, start, end) for text, label, start, end in entities if label == "VALUE"]
+
+            logger.info(f"Entities in sentence '{sent.text}': PARAM={param_ents}, VALUE={value_ents}")
+
+            for param_text, param_start, param_end in param_ents:
+                param = None
+                for field, synonyms in field_synonyms.items():
+                    if param_text.lower() in [s.lower() for s in synonyms]:
+                        param = field
+                        break
+                if not param:
+                    logger.warning(f"Parameter {param_text} not mapped to valid field")
                     continue
 
-        # Almacenar en Qdrant si hay reglas
+                closest_value = None
+                min_distance = float('inf')
+                selected_operator = None
+                selected_unit = ""
+
+                for value_text, value_start, value_end in value_ents:
+                    try:
+                        value = float(value_text)
+                    except ValueError:
+                        logger.warning(f"Invalid value: {value_text}")
+                        continue
+
+                    distance = value_start - param_end
+                    if distance < 0 or distance > 100:
+                        continue
+
+                    try:
+                        operator = detect_operator_between(param_end, value_start, sent.text)
+                        unit = detect_unit_near(value_end, param, sent.text)
+                    except Exception as e:
+                        logger.error(f"Error detecting operator/unit for {param_text} and {value_text}: {str(e)}")
+                        continue
+
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_value = value
+                        selected_operator = operator
+                        selected_unit = unit
+
+                if closest_value is not None:
+                    rules[param] = {
+                        "value": closest_value,
+                        "operator": selected_operator,
+                        "unit": selected_unit,
+                        "source_text": sent.text
+                    }
+                    logger.info(f"Rule extracted: {param} {selected_operator} {closest_value}{selected_unit}")
+
         if rules:
             embedding = model.encode(content).tolist()
             qdrant_client.upsert(
@@ -225,18 +328,17 @@ async def load_sop(machine: str) -> Dict:
                     }
                 )]
             )
+            logger.info(f"Rules stored in Qdrant for {machine}: {rules}")
 
         return rules
 
     except Exception as e:
-        logger.error(f"Procesamiento de SOP falló para {machine}: {str(e)}")
+        logger.error(f"SOP processing failed for {machine}: {str(e)}")
         return {}
 
 @mcp.tool()
-async def get_pdf_content(ctx: Context, filename: str) -> str:
-    """Extrae y devuelve el contenido de texto de un PDF almacenado en MinIO."""
+def get_pdf_content(ctx: Context, filename: str) -> str:
     try:
-        # Cargar PDF desde MinIO
         try:
             response = minio_client.get_object(MINIO_BUCKET, filename)
             pdf_data = response.read()
@@ -246,12 +348,11 @@ async def get_pdf_content(ctx: Context, filename: str) -> str:
             available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
             return json.dumps({
                 "status": "error",
-                "message": f"PDF no encontrado: {filename}. PDFs disponibles: {', '.join(available_pdfs)}",
+                "message": f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}",
                 "filename": filename,
                 "content": ""
             }, ensure_ascii=False)
 
-        # Extraer texto del PDF
         with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
             content = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
@@ -262,7 +363,7 @@ async def get_pdf_content(ctx: Context, filename: str) -> str:
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Error al extraer contenido de {filename}: {str(e)}")
+        logger.error(f"Error extracting content from {filename}: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
@@ -271,17 +372,16 @@ async def get_pdf_content(ctx: Context, filename: str) -> str:
         }, ensure_ascii=False)
 
 @mcp.tool()
-async def list_fields(ctx: Context) -> str:
-    """Lista los campos disponibles en los datos de la API MES."""
+def list_fields(ctx: Context) -> str:
     try:
-        response = await auth_client.get("/machines/")
+        response = auth_client.get("/machines/")
         response.raise_for_status()
         records = response.json()
 
         if not records:
             return json.dumps({
                 "status": "no_data",
-                "message": "No se encontraron registros en el sistema MES",
+                "message": "No records found in MES system",
                 "key_figures": [],
                 "key_values": {}
             })
@@ -297,6 +397,7 @@ async def list_fields(ctx: Context) -> str:
                 unique_values = sorted({rec[field] for rec in records if field in rec})
                 key_values[field] = unique_values
 
+        logger.info(f"Fields listed: key_figures={key_figures}, key_values={key_values}")
         return json.dumps({
             "status": "success",
             "key_figures": key_figures,
@@ -304,7 +405,7 @@ async def list_fields(ctx: Context) -> str:
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Listado de campos falló: {str(e)}")
+        logger.error(f"Field listing failed: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
@@ -313,21 +414,18 @@ async def list_fields(ctx: Context) -> str:
         }, ensure_ascii=False)
 
 @mcp.tool()
-async def fetch_mes_data(
+def fetch_mes_data(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Obtiene datos de la API MES o Qdrant, filtra dinámicamente y almacena en Qdrant."""
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
         
-        # Validar campos solicitados
-        fields_info = await DataValidator.validate_fields(ctx, key_figures, key_values)
+        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
         valid_values = fields_info["key_values"]
         
-        # Seleccionar identificador dinámicamente
         identifier_field = None
         identifier_value = None
         if key_values:
@@ -340,7 +438,6 @@ async def fetch_mes_data(
             identifier_field = next(iter(valid_values))
             identifier_value = key_values.get(identifier_field)
 
-        # Construir condiciones para Qdrant
         must_conditions = []
         if identifier_field and identifier_value:
             must_conditions.append(models.FieldCondition(key=identifier_field, match=models.MatchValue(value=identifier_value)))
@@ -364,7 +461,6 @@ async def fetch_mes_data(
 
         processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
 
-        # Si no hay datos en Qdrant, obtener de la API
         if not processed_data:
             params = {}
             if "start_date" in key_values and "end_date" in key_values:
@@ -374,13 +470,11 @@ async def fetch_mes_data(
                 })
             data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
 
-            # Solicitud directa a la API
             endpoint = f"/machines/{identifier_value}" if identifier_field and identifier_value else "/machines/"
-            response = await auth_client.get(endpoint, params=params)
+            response = auth_client.get(endpoint, params=params)
             response.raise_for_status()
             data = response.json()
 
-            # Procesar registros dinámicamente
             processed_data = []
             for record in data:
                 if all(record.get(k) == v for k, v in data_filters.items()):
@@ -389,7 +483,6 @@ async def fetch_mes_data(
                         item[identifier_field] = record[identifier_field]
                     processed_data.append(item)
 
-            # Almacenar en Qdrant
             if processed_data:
                 points = [
                     models.PointStruct(
@@ -400,6 +493,7 @@ async def fetch_mes_data(
                 ]
                 qdrant_client.upsert(collection_name="mes_logs", points=points)
 
+        logger.info(f"Fetched {len(processed_data)} records for {key_values}")
         return json.dumps({
             "status": "success",
             "count": len(processed_data),
@@ -416,7 +510,7 @@ async def fetch_mes_data(
         }, ensure_ascii=False)
 
 @mcp.tool()
-async def add_custom_rule(
+def add_custom_rule(
     ctx: Context,
     machines: Union[List[str], str],
     key_figures: Union[Dict[str, float], str],
@@ -461,7 +555,6 @@ async def add_custom_rule(
         ```
     """
     try:
-        # Parsear máquinas
         if isinstance(machines, str):
             try:
                 machines = json.loads(machines)
@@ -469,14 +562,13 @@ async def add_custom_rule(
                 machines = [machines.strip()]
 
         if not isinstance(machines, list):
-            raise ValueError("machines debe ser una lista de strings")
+            raise ValueError("machines must be a list of strings")
 
-        # Parsear key_figures
         if isinstance(key_figures, str):
             try:
                 parsed_figures = json.loads(key_figures)
                 if not isinstance(parsed_figures, dict):
-                    raise ValueError("key_figures JSON debe ser un diccionario")
+                    raise ValueError("key_figures JSON must be a dictionary")
                 key_figures = parsed_figures
             except json.JSONDecodeError:
                 parsed_figures = {}
@@ -486,54 +578,48 @@ async def add_custom_rule(
                     elif ':' in pair:
                         field, value = pair.split(':', 1)
                     else:
-                        raise ValueError(f"Formato inválido: {pair}. Use 'campo=valor' o 'campo:valor'")
+                        raise ValueError(f"Invalid format: {pair}: Use 'key=value' or 'key:value'")
                     
                     field = field.strip()
                     try:
                         parsed_figures[field] = float(value.strip())
                     except ValueError:
-                        raise ValueError(f"Valor inválido para {field}: debe ser numérico")
+                        raise ValueError(f"Invalid value for {field}: must be numeric")
                 key_figures = parsed_figures
         elif isinstance(key_figures, dict):
             parsed_figures = {k: float(v) for k, v in key_figures.items()}
             key_figures = parsed_figures
         else:
-            raise ValueError("key_figures debe ser dict o string")
+            raise ValueError("key_figures must be dict or string")
 
-        # Validación de datos
         if not machines:
-            raise ValueError("Debe especificar al menos una máquina")
+            raise ValueError("At least one machine must be specified")
 
         if not key_figures:
-            raise ValueError("Debe especificar al menos una métrica")
+            raise ValueError("At least one metric must be specified")
 
-        fields_info = json.loads(await list_fields(ctx))
+        fields_info = json.loads(list_fields(ctx))
         if fields_info["status"] != "success":
-            raise ValueError("No se pudo validar contra la API")
+            raise ValueError("Could not validate against API")
 
-        # Validar máquinas
         valid_machines = fields_info["key_values"].get("machine", [])
         invalid_machines = [m for m in machines if m not in valid_machines]
         if invalid_machines:
-            raise ValueError(f"Máquinas inválidas: {invalid_machines}. Máquinas válidas: {valid_machines}")
+            raise ValueError(f"Invalid machines: {invalid_machines}. Valid machines: {valid_machines}")
 
-        # Validar métricas
         invalid_metrics = [f for f in key_figures if f not in fields_info["key_figures"]]
         if invalid_metrics:
-            raise ValueError(f"Métricas inválidas: {invalid_metrics}. Métricas válidas: {fields_info['key_figures']}")
+            raise ValueError(f"Invalid metrics: {invalid_metrics}. Valid metrics: {fields_info['key_figures']}")
 
-        # Validar operador
         valid_operators = [">=", "<=", ">", "<", "==", "!="]
         if operator not in valid_operators:
-            raise ValueError(f"Operador inválido. Use uno de: {valid_operators}")
+            raise ValueError(f"Invalid operator. Use one of: {valid_operators}")
 
-        # Validar key_values
         if key_values:
             for k, v in key_values.items():
                 if k not in fields_info["key_values"] or v not in fields_info["key_values"].get(k, []):
-                    raise ValueError(f"Filtro inválido: {k}={v}. Valores válidos para {k}: {fields_info['key_values'].get(k, [])}")
+                    raise ValueError(f"Invalid filter: {k}={v}. Valid values for {k}: {fields_info['key_values'].get(k, [])}")
 
-        # Preparar regla final
         final_rule = {
             "machines": machines,
             "key_figures": key_figures,
@@ -543,7 +629,6 @@ async def add_custom_rule(
             "description": description
         }
 
-        # Almacenar en Qdrant
         embedding_text = description or " ".join(
             [f"{k} {operator} {v}{unit or ''}" for k, v in key_figures.items()]
         )
@@ -558,15 +643,14 @@ async def add_custom_rule(
             )]
         )
 
-        # Mensaje descriptivo
         metrics_desc = ", ".join(
             [f"{k} {operator} {v}{unit or ''}" for k, v in key_figures.items()]
         )
         filters_desc = ", ".join([f"{k}={v}" for k, v in (key_values or {}).items()])
         
-        message = f"Regla añadida para {len(machines)} máquina(s): {metrics_desc}"
+        message = f"Rule added for {len(machines)} machine(s): {metrics_desc}"
         if filters_desc:
-            message += f" | Filtros: {filters_desc}"
+            message += f" | Filters: {filters_desc}"
 
         return json.dumps({
             "status": "success",
@@ -580,7 +664,7 @@ async def add_custom_rule(
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Error al añadir regla: {str(e)}")
+        logger.error(f"Error adding rule: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
@@ -595,13 +679,12 @@ async def add_custom_rule(
         }, ensure_ascii=False)
 
 @mcp.tool()
-async def list_custom_rules(
+def list_custom_rules(
     ctx: Context,
     rule_id: Optional[str] = None,
     machine: Optional[str] = None,
     limit: int = 10
 ) -> str:
-    """Lista todas las reglas personalizadas o filtra por ID/máquina."""
     try:
         filter_conditions = []
         if rule_id:
@@ -658,7 +741,7 @@ async def list_custom_rules(
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Error al listar reglas: {str(e)}")
+        logger.error(f"Error listing rules: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
@@ -666,7 +749,7 @@ async def list_custom_rules(
         }, ensure_ascii=False)
 
 @mcp.tool()
-async def delete_custom_rule(
+def delete_custom_rule(
     ctx: Context,
     rule_id: str
 ) -> str:
@@ -708,7 +791,7 @@ async def delete_custom_rule(
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Error al eliminar regla {rule_id}: {str(e)}")
+        logger.error(f"Error deleting rule {rule_id}: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
@@ -716,7 +799,7 @@ async def delete_custom_rule(
         }, ensure_ascii=False)
 
 @mcp.tool()
-async def analyze_compliance(
+def analyze_compliance(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
@@ -743,11 +826,10 @@ async def analyze_compliance(
         key_values = key_values or {}
         key_figures = key_figures or []
         
-        # Validar campos solicitados
-        fields_info = await DataValidator.validate_fields(ctx, key_figures, key_values)
+        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
         valid_values = fields_info["key_values"]
+        logger.info(f"Validating fields: key_figures={key_figures}, key_values={key_values}")
         
-        # Seleccionar identificador dinámicamente
         identifier_field = None
         identifier_value = None
         if key_values:
@@ -760,8 +842,7 @@ async def analyze_compliance(
             identifier_field = next(iter(valid_values))
             identifier_value = key_values.get(identifier_field)
 
-        # Obtener datos de manufactura
-        fetch_result = json.loads(await fetch_mes_data(ctx, key_values, key_figures))
+        fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures))
         if fetch_result["status"] != "success":
             return json.dumps({
                 "status": "error",
@@ -769,29 +850,28 @@ async def analyze_compliance(
                 "results": []
             }, ensure_ascii=False)
 
-        # Cargar reglas SOP para las máquinas relevantes
         machines = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
         machine_rules = {}
         for machine in machines:
-            machine_rules[machine] = await load_sop(machine)
+            machine_rules[machine] = load_sop(machine)
+            logger.info(f"SOP rules for {machine}: {machine_rules[machine]}")
 
-        # Cargar reglas personalizadas desde Qdrant
         custom_rules = []
         if machines:
             custom_result = qdrant_client.scroll(
                 collection_name="custom_rules",
                 scroll_filter=models.Filter(must=[
-                    models.FieldCondition(key="machines", match=models.MatchAny(any=list(machines)))
+                    models.FieldCondition(key="machines", match=models.MatchAny(any=list(machines))),
                 ]),
                 limit=100
             )
             custom_rules = [r.payload for r in custom_result[0]] if custom_result[0] else []
+            logger.info(f"Custom rules: {len(custom_rules)}")
 
-        # Analizar cumplimiento para cada registro
         results = []
         for record in fetch_result["data"]:
             analysis = {
-                "metrics": {f: record[f] for f in key_figures if f in record},
+                "metrics": {k: record[k] for k in key_figures if k in record},
                 "compliance": {},
                 "compliance_percentage": 0.0
             }
@@ -803,25 +883,38 @@ async def analyze_compliance(
             
             for field in key_figures:
                 if field not in record:
+                    logger.warning(f"Field {field} not in record: {record}")
                     continue
                     
                 total += 1
                 compliance_info = {}
                 
-                # Verificar regla SOP
                 machine = record.get(identifier_field) if identifier_field else None
                 sop_rules = machine_rules.get(machine, {}) if machine else {}
                 if field in sop_rules:
                     rule = sop_rules[field]
                     value = record[field]
                     op = rule["operator"]
-                    is_compliant = (value >= rule["value"]) if op == ">=" else (value <= rule["value"])
+                    is_compliant = False
+                    if op == ">=":
+                        is_compliant = value >= rule['value']
+                    elif op == "<=":
+                        is_compliant = value <= rule['value']
+                    elif op == ">":
+                        is_compliant = value > rule['value']
+                    elif op == "<":
+                        is_compliant = value < rule['value']
+                    elif op == "==":
+                        is_compliant = value == rule['value']
+                    elif op == "!=":
+                        is_compliant = value != rule['value']
                     compliance_info["sop"] = {
                         "value": value,
                         "rule": f"{op} {rule['value']}{rule.get('unit', '')}",
-                        "status": "compliant" if is_compliant else "non_compliant"
+                        "status": "is_compliant" if is_compliant else "non_compliant"
                     }
                     compliant += 1 if is_compliant else 0
+                    logger.info(f"SOP compliance for {field}: {compliance_info['sop']}")
                 else:
                     compliance_info["sop"] = {
                         "value": record[field],
@@ -829,7 +922,6 @@ async def analyze_compliance(
                         "status": "unknown"
                     }
                 
-                # Verificar reglas personalizadas
                 compliance_info["custom"] = []
                 for rule in custom_rules:
                     if field not in rule["key_figures"]:
@@ -858,10 +950,11 @@ async def analyze_compliance(
                     compliance_info["custom"].append({
                         "value": value,
                         "rule": f"{op} {rule_value}{rule.get('unit', '')}",
-                        "status": "compliant" if is_compliant else "non_compliant",
+                        "status": "is_compliant" if is_compliant else "non_compliant",
                         "description": rule.get("description", ""),
                         "filters": rule["key_values"]
                     })
+                    logger.info(f"Custom compliance for {field}: {compliance_info['custom'][-1]}")
                 
                 if not compliance_info["custom"]:
                     compliance_info["custom"].append({
@@ -879,24 +972,24 @@ async def analyze_compliance(
             
             results.append(analysis)
 
-        # Formatear descripción del período
         period = "all dates"
         if "start_date" in key_values and "end_date" in key_values:
             period = f"{key_values['start_date']} to {key_values['end_date']}"
 
+        logger.info(f"Compliance analysis completed: {len(results)} results")
         return json.dumps({
             "status": "success",
             "period": period,
             "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
             "metrics_analyzed": key_figures,
             "results": results,
-            "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP" if machines else "N/A",
+            "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP",
             "custom_rules_applied": len(custom_rules),
             "analysis_notes": []
         }, ensure_ascii=False)
 
     except Exception as e:
-        logger.error(f"Análisis de cumplimiento falló: {str(e)}")
+        logger.error(f"Compliance analysis failed: {str(e)}")
         return json.dumps({
             "status": "error",
             "message": str(e),
