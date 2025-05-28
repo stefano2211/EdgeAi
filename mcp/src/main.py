@@ -3,7 +3,6 @@ from mcp.server.fastmcp import FastMCP, Context
 from datetime import datetime
 from typing import Optional, List, Dict, Union
 import logging
-from pydantic import BaseModel
 import re
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
@@ -115,6 +114,7 @@ def init_infrastructure():
         raise
 
 
+
 class DataValidator:
     @staticmethod
     def validate_date(date_str: str, field: str) -> None:
@@ -159,40 +159,64 @@ class DataValidator:
             raise
 
 def detect_operator_between(param_end: int, value_start: int, sentence: str) -> str:
-    text_before = sentence[max(0, param_end - 10):value_start].lower()
+    text_before = sentence[max(0, param_end - 20):value_start].lower()
     operator_map = {
-        ">=": [">=", "≥", "greater than or equal", "at least"],
-        "<=": ["<=", "≤", "less than or equal", "at most"],
-        ">": [">", "greater than", "exceeds"],
-        "<": ["<", "less than", "below"],
-        "==": ["=", "==", "equals"],
-        "!=": ["!=", "not equal"]
+        ">=": [r">=", r"≥", r"greater\s+than\s+or\s+equal", r"at\s+least"],
+        "<=": [r"<=", r"≤", r"less\s+than\s+or\s+equal", r"at\s+most", r"not\s+exceeding"],
+        ">": [r">", r"greater\s+than", r"exceeds"],
+        "<": [r"<", r"less\s+than", r"below", r"must\s+be\s+below"],
+        "==": [r"=", r"==", r"equals", r"equal\s+to"],
+        "!=": [r"!=", r"not\s+equal"]
     }
-    for op_key, synonyms in operator_map.items():
-        for syn in synonyms:
-            if syn.lower() in text_before:
+    for op_key, patterns in operator_map.items():
+        for pattern in patterns:
+            if re.search(pattern, text_before):
                 return op_key
     logger.warning(f"No operator detected in '{text_before}', defaulting to >=")
     return ">="
 
 def detect_unit_near(value_end: int, param: str, sentence: str) -> str:
-    known_units = {
-        "temperature": ["°C", "°F"],
-        "vibration": ["mm/s", "in/s"],
-        "uptime": ["%"],
-        "defects": [""],
-        "pressure": ["bar", "psi", "hPa"],
-        "humidity": ["%"],
-        "production_rate": ["/min", "/h"],
-        "throughput": ["/min", "/h"],
-        "inventory_level": [""]
-    }
-    text_after = sentence[value_end:value_end + 10].lower()
-    valid_units = known_units.get(param, ["%", "°C", "°F", "mm/s", "in/s", "bar", "psi", "hPa", "s", "min", "h", "m", "mm", "cm", "in", "ft"])
-    for unit in valid_units:
-        if unit.lower() in text_after:
-            return unit
-    return ""
+    text_after = sentence[value_end:value_end + 15].lower()
+    unit_patterns = [
+        (r"°[cf]", ["temperature"]),  # °C, °F
+        (r"mm/s|in/s|mm/sec", ["vibration"]),  # Vibration units
+        (r"%", ["uptime", "humidity"]),  # Percentage
+        (r"bar|psi|hpa", ["pressure"]),  # Pressure units
+        (r"/min|/h", ["throughput", "production_rate"]),  # Rate units
+        (r"db|decibel", ["noise_level"]),  # Noise units
+        (r"rpm", ["speed"]),  # Rotational speed
+        (r"mm|cm|m|in|ft", ["length", "width", "height"]),  # Length units
+        (r"s|min|h", ["time"]),  # Time units
+    ]
+    for pattern, params in unit_patterns:
+        if param in params or not params:  # Match specific params or general units
+            if re.search(pattern, text_after):
+                match = re.search(pattern, text_after)
+                return match.group(0)
+    return "" if param in ["defects", "inventory_level"] else ""
+
+def generate_field_synonyms(valid_fields: List[str]) -> Dict[str, List[str]]:
+    synonyms = {}
+    for field in valid_fields:
+        base_synonyms = [field, field.replace("_", " ")]
+        if field.endswith("s"):
+            base_synonyms.append(field[:-1])  # Plural to singular
+        elif field in ["uptime", "downtime", "runtime"]:
+            base_synonyms.extend([f"{field[:-4]}{suffix}" for suffix in ["", " percentage", " ratio"]])
+        elif "temperature" in field:
+            base_synonyms.extend(["temp", "thermo", f"{field} level"])
+        elif "vibration" in field:
+            base_synonyms.extend(["vib", "oscillation", f"{field} amplitude"])
+        elif "defects" in field:
+            base_synonyms.extend(["defect", "rejections", "faults", "errors"])
+        elif "pressure" in field:
+            base_synonyms.extend(["press", "force"])
+        elif "humidity" in field:
+            base_synonyms.extend(["moisture", "hum"])
+        elif "throughput" in field or "rate" in field:
+            base_synonyms.extend(["output", "production rate", "flow"])
+        synonyms[field] = list(set(base_synonyms))  # Remove duplicates
+    return synonyms
 
 def load_sop(machine: str) -> Dict:
     try:
@@ -201,7 +225,6 @@ def load_sop(machine: str) -> Dict:
             scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
             limit=1
         )
-        
         if existing[0]:
             logger.info(f"Rules found in Qdrant for {machine}")
             return existing[0][0].payload.get("rules", {})
@@ -216,9 +239,18 @@ def load_sop(machine: str) -> Dict:
             return {}
 
         with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
-            content = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            content = ""
+            for page in pdf.pages:
+                content += (page.extract_text() or "")
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        content += " ".join(str(cell) for cell in row if cell) + "\n"
 
         content = content.replace("$<=$", "<=").replace("$>=$", ">=").replace(r"^{\circ}", "°").replace(r"\%", "%")
+        content = re.sub(r"<[ ]*=", "<=", content)
+        content = re.sub(r">+[ ]*=", ">=", content)
+        content = re.sub(r"(\w+)(<=|>=|=|<|>)", r"\1 \2", content)
         content = re.sub(r"\s+", " ", content).strip()
 
         logger.info(f"Extracted text for {machine}: {content[:100]}...")
@@ -227,16 +259,8 @@ def load_sop(machine: str) -> Dict:
         valid_fields = fields_info.get("key_figures", []) if fields_info.get("status") == "success" else []
         logger.info(f"Valid fields from list_fields: {valid_fields}")
 
-        field_synonyms = {field: [field, field.replace("_", " ")] for field in valid_fields}
-        field_synonyms.update({
-            "uptime": ["uptime", "availability", "runtime"],
-            "temperature": ["temperature", "temp", "thermo"],
-            "vibration": ["vibration", "vib", "oscillation"],
-            "defects": ["defects", "defect", "rejections", "faults", "errors"],
-            "pressure": ["pressure", "press", "force"],
-            "humidity": ["humidity", "moisture", "hum"],
-            "production_rate": ["production rate", "output", "throughput"]
-        })
+        field_synonyms = generate_field_synonyms(valid_fields)
+        logger.info(f"Generated field_synonyms: {field_synonyms}")
 
         @Language.component("custom_ner")
         def custom_ner(doc):
@@ -519,41 +543,6 @@ def add_custom_rule(
     unit: Optional[str] = None,
     description: str = ""
 ) -> str:
-    """Añade una regla de cumplimiento personalizada para múltiples máquinas y métricas.
-
-    Versión mejorada que acepta:
-    - Dict: {"temperature": 70.0, "pressure": 1.2}
-    - String: "temperature=70,pressure=1.2" o "temperature:70,pressure:1.2"
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        machines (Union[List[str], str]): Lista de máquinas o string JSON.
-            Ejemplo válido: ["ModelA"] o '["ModelA", "ModelB"]'
-        key_figures (Union[Dict[str, float], str]): Métricas y valores umbral.
-            Ejemplos válidos:
-            - {"temperature": 70.0, "pressure": 1.2}
-            - "temperature=70,pressure=1.2"
-            - "temperature:70,pressure:1.2"
-        key_values (Optional[Dict[str, str]]): Filtros categóricos.
-            Ejemplo: {"material": "Steel", "batch": "A123"}
-        operator (str): Operador de comparación (>=, <=, >, <, ==, !=).
-        unit (Optional[str]): Unidad de medida común para todas las métricas.
-        description (str): Descripción de la regla.
-
-    Returns:
-        str: JSON con estado y detalles de la regla creada.
-
-    Ejemplo de uso LLM:
-        ```json
-        {
-            "machines": ["ModelA"],
-            "key_figures": {"temperature": 70.0},
-            "operator": ">=",
-            "unit": "°C",
-            "description": "Temperatura mínima requerida"
-        }
-        ```
-    """
     try:
         if isinstance(machines, str):
             try:
@@ -753,7 +742,6 @@ def delete_custom_rule(
     ctx: Context,
     rule_id: str
 ) -> str:
-    """Elimina una regla personalizada por su ID."""
     try:
         existing = qdrant_client.retrieve(
             collection_name="custom_rules",
@@ -764,7 +752,7 @@ def delete_custom_rule(
         if not existing:
             return json.dumps({
                 "status": "error",
-                "message": f"Regla con ID {rule_id} no encontrada"
+                "message": f"Rule with ID {rule_id} not found"
             }, ensure_ascii=False)
 
         qdrant_client.delete(
@@ -780,7 +768,7 @@ def delete_custom_rule(
 
         return json.dumps({
             "status": "success",
-            "message": f"Regla eliminada: {', '.join(metrics)} para {len(machines)} máquina(s)",
+            "message": f"Rule deleted: {', '.join(metrics)} for {len(machines)} machine(s)",
             "deleted_rule": {
                 "id": rule_id,
                 "affected_machines": machines,
