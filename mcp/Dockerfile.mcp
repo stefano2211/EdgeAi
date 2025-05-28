@@ -4,7 +4,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install "mcp[cli]"
+RUN pip install "mcp[cli]" spacy==3.7.2 scikit-learn==1.3.0
+RUN python -m spacy download es_core_news_md
 
 COPY src/ ./src/
 
