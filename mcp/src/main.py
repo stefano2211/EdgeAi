@@ -820,17 +820,18 @@ def analyze_compliance(
     1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
     2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data.
     3. Carga reglas SOP y personalizadas para las máquinas relevantes.
-    4. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
-    5. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
-    6. Devuelve un informe detallado con resultados de cumplimiento.
+    4. Filtra los datos por todos los key_values proporcionados.
+    5. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
+    6. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
+    7. Devuelve un informe detallado con resultados de cumplimiento.
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
         key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Example, {"machine": "ModelA", "production_line":"Line1", "start_date": "2025-04-09",
+            para filtrar (Ejemplo, {"machine": "ModelA", "production_line": "Line3", "start_date": "2025-04-09",
             "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
         key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (Example, ["temperature", "uptime"]).
+            (Ejemplo, ["temperature", "uptime"]).
     """
     try:
         key_values = key_values or {}
@@ -844,7 +845,7 @@ def analyze_compliance(
         identifier_value = None
         if key_values:
             for field in key_values:
-                if field in valid_values:
+                if field in valid_values and field not in ["start_date", "end_date"]:
                     identifier_field = field
                     identifier_value = key_values[field]
                     break
@@ -859,6 +860,15 @@ def analyze_compliance(
                 "message": fetch_result.get("message", "Data retrieval failed"),
                 "results": []
             }, ensure_ascii=False)
+
+        # Filtrar dinámicamente por todos los key_values (excepto fechas)
+        filter_fields = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
+        if filter_fields:
+            fetch_result["data"] = [
+                r for r in fetch_result["data"]
+                if all(r.get(k) == v for k, v in filter_fields.items())
+            ]
+            logger.info(f"Filtered data by {filter_fields}: {len(fetch_result['data'])} records")
 
         machines = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
         machine_rules = {}
@@ -883,8 +893,13 @@ def analyze_compliance(
             analysis = {
                 "metrics": {k: record[k] for k in key_figures if k in record},
                 "compliance": {},
-                "compliance_percentage": 0.0
+                "compliance_percentage": 0.0,
+                "date": record.get("date", ""),
             }
+            # Incluir todos los key_values en los resultados
+            for k in valid_values:
+                if k in record:
+                    analysis[k] = record[k]
             if identifier_field and identifier_field in record:
                 analysis[identifier_field] = record[identifier_field]
             
