@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # Configuración
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")  # Cambia en producción
 ALGORITHM = "HS256"
-TOKEN_EXPIRE_MINUTES = 60
+TOKEN_EXPIRE_MINUTES = 60  # Tokens expiran en 60 minutos
 
 # Modelo para login
 class LoginRequest(BaseModel):
@@ -30,25 +30,27 @@ security = HTTPBearer()
 
 # Inicialización de la base de datos
 def init_db():
-    """Inicializa la base de datos SQLite con tablas para equipos, sesiones y usuarios."""
+    """Inicializa la base de datos SQLite con tablas para máquinas, sesiones y usuarios."""
     try:
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
         
-        # Tabla para equipos (usando date en formato YYYY-MM-DD)
+        # Tabla para máquinas
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS machines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
-                equipment_id TEXT NOT NULL,
-                operation_mode TEXT NOT NULL,
-                product_type TEXT NOT NULL,
-                cycle_time REAL NOT NULL,
-                error_count INTEGER NOT NULL,
-                pressure REAL NOT NULL,
-                power_consumption REAL NOT NULL,
-                status TEXT NOT NULL,
-                output_rate REAL NOT NULL
+                machine TEXT NOT NULL,
+                production_line TEXT NOT NULL,
+                material TEXT NOT NULL,
+                batch_id TEXT NOT NULL,
+                uptime REAL NOT NULL,
+                defects INTEGER NOT NULL,
+                vibration REAL NOT NULL,
+                temperature REAL NOT NULL,
+                defect_type TEXT NOT NULL,
+                throughput REAL NOT NULL,
+                inventory_level INTEGER NOT NULL
             )
         """)
         
@@ -69,29 +71,34 @@ def init_db():
             )
         """)
         cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES (?, ?)", 
-                       ("admin", "password123"))
+                       ("admin", "password123"))  # Cambia en producción
         
-        # Insertar registros fijos para equipos
+        # Insertar registros fijos para máquinas
         cursor.execute("SELECT COUNT(*) FROM machines")
         count = cursor.fetchone()[0]
         if count == 0:
             fixed_records = [
-                ("2025-05-20", "EquipA", "Auto", "WidgetA", 12.5, 1, 5.2, 15.0, "Running", 120.0),
-                ("2025-05-20", "EquipB", "Manual", "WidgetB", 14.0, 2, 4.8, 16.5, "Running", 110.0),
-                ("2025-05-20", "EquipC", "Auto", "WidgetC", 11.8, 0, 5.0, 14.5, "Running", 125.0),
-                ("2025-05-21", "EquipA", "Auto", "WidgetA", 13.0, 3, 5.5, 15.8, "Stopped", 100.0),
-                ("2025-05-21", "EquipB", "Auto", "WidgetB", 12.7, 1, 4.9, 15.2, "Running", 115.0),
-                ("2025-05-21", "EquipD", "Manual", "WidgetD", 15.0, 4, 5.3, 17.0, "Stopped", 95.0),
-                ("2025-05-22", "EquipA", "Auto", "WidgetA", 12.3, 0, 5.1, 14.8, "Running", 122.0),
-                ("2025-05-22", "EquipC", "Auto", "WidgetC", 11.5, 2, 5.0, 14.0, "Running", 130.0),
-                ("2025-05-22", "EquipB", "Manual", "WidgetB", 14.5, 1, 4.7, 16.0, "Running", 108.0),
-                ("2025-05-22", "EquipD", "Auto", "WidgetD", 13.8, 2, 5.4, 16.2, "Running", 112.0),
+                ("2025-04-10", "ModelA", "Line3", "Steel", "BATCH101", 95.0, 2, 0.7, 75.0, "scratch", 90.0, 400),
+                ("2025-04-10", "ModelB", "Line2", "Aluminum", "BATCH102", 97.5, 1, 0.6, 70.0, "dent", 88.0, 350),
+                ("2025-04-11", "ModelC", "Line1", "Copper", "BATCH137", 87.0, 3, 0.8, 81.0, "crack", 85.0, 350),
+                ("2025-04-10", "ModelD", "Line3", "Plastic", "BATCH104", 97.5, 4, 0.9, 78.0, "warp", 87.0, 300),
+                ("2025-04-10", "ModelE", "Line2", "Brass", "BATCH105", 90.0, 2, 0.65, 72.0, "chip", 89.0, 320),
+                ("2025-04-10", "ModelF", "Line1", "Titanium", "BATCH106", 95.0, 2, 0.75, 76.0, "scratch", 91.0, 380),
+                ("2025-04-09", "ModelA", "Line1", "Aluminum", "BATCH107", 97.5, 1, 0.6, 74.0, "dent", 92.0, 410),
+                ("2025-04-09", "ModelB", "Line2", "Aluminum", "BATCH108", 92.0, 3, 0.8, 79.0, "crack", 86.0, 340),
+                ("2025-04-09", "ModelC", "Line1", "Copper", "BATCH109", 88.5, 4, 0.85, 82.0, "warp", 84.0, 360),
+                ("2025-04-09", "ModelD", "Line3", "Plastic", "BATCH110", 90.0, 2, 0.7, 77.0, "chip", 88.0, 310),
+                ("2025-04-09", "ModelE", "Line2", "Brass", "BATCH111", 99.0, 0, 0.5, 70.0, "none", 93.0, 330),
+                ("2025-04-09", "ModelF", "Line1", "Titanium", "BATCH112", 85.5, 5, 0.9, 80.0, "scratch", 83.0, 370),
+                ("2025-04-11", "ModelA", "Line1", "Steel", "BATCH113", 93.0, 1, 0.4, 73.0, "dent", 90.0, 390),
+                ("2025-04-11", "ModelB", "Line2", "Aluminum", "BATCH114", 96.5, 2, 0.7, 71.0, "crack", 89.0, 360),
+                ("2025-04-11", "ModelD", "Line3", "Plastic", "BATCH115", 89.0, 3, 0.8, 79.0, "warp", 86.0, 320),
             ]
             cursor.executemany("""
                 INSERT INTO machines (
-                    date, equipment_id, operation_mode, product_type, cycle_time,
-                    error_count, pressure, power_consumption, status, output_rate
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    date, machine, production_line, material, batch_id, uptime, defects,
+                    vibration, temperature, defect_type, throughput, inventory_level
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, fixed_records)
         
         conn.commit()
@@ -216,14 +223,27 @@ async def get_all_machines(
     specific_date: Optional[str] = None,
     username: str = Depends(validate_token)
 ):
-    """Obtiene todos los registros de equipos, opcionalmente filtrados por fechas."""
+    """Obtiene todos los registros de máquinas, opcionalmente filtrados por fechas.
+
+    Args:
+        start_date (Optional[str]): Fecha de inicio (YYYY-MM-DD).
+        end_date (Optional[str]): Fecha de fin (YYYY-MM-DD).
+        specific_date (Optional[str]): Fecha específica (YYYY-MM-DD).
+        username (str): Nombre de usuario autenticado.
+
+    Returns:
+        List[dict]: Lista de registros de máquinas.
+
+    Raises:
+        HTTPException: Si ocurre un error en la consulta (500).
+    """
     try:
         conn = sqlite3.connect("database.db")
         cursor = conn.cursor()
         
         base_query = """
-            SELECT id, date, equipment_id, operation_mode, product_type, cycle_time,
-                   error_count, pressure, power_consumption, status, output_rate
+            SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
+                   vibration, temperature, defect_type, throughput, inventory_level
             FROM machines
         """
         
@@ -249,49 +269,66 @@ async def get_all_machines(
         
         cursor.execute(query, params)
         
-        records = []
+        machines = []
         for row in cursor.fetchall():
-            records.append({
+            machines.append({
                 "id": row[0],
                 "date": row[1],
-                "equipment_id": row[2],
-                "operation_mode": row[3],
-                "product_type": row[4],
-                "cycle_time": row[5],
-                "error_count": row[6],
-                "pressure": row[7],
-                "power_consumption": row[8],
-                "status": row[9],
-                "output_rate": row[10]
+                "machine": row[2],
+                "production_line": row[3],
+                "material": row[4],
+                "batch_id": row[5],
+                "uptime": row[6],
+                "defects": row[7],
+                "vibration": row[8],
+                "temperature": row[9],
+                "defect_type": row[10],
+                "throughput": row[11],
+                "inventory_level": row[12]
             })
-        return records
+        return machines
     except Exception as e:
-        logger.error(f"Failed to fetch equipment records: {str(e)}")
+        logger.error(f"Failed to fetch machines: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 
-@app.get("/machines/{equipment_id}")
+# Endpoint para obtener registros por máquina (protegido)
+@app.get("/machines/{machine}")
 async def get_machine_records(
-    equipment_id: str,
+    machine: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None,
     username: str = Depends(validate_token)
 ):
-    """Obtiene registros para un equipo específico, opcionalmente filtrados por fechas."""
+    """Obtiene registros para una máquina específica, opcionalmente filtrados por fechas.
+
+    Args:
+        machine (str): Nombre de la máquina.
+        start_date (Optional[str]): Fecha de inicio (YYYY-MM-DD).
+        end_date (Optional[str]): Fecha de fin (YYYY-MM-DD).
+        specific_date (Optional[str]): Fecha específica (YYYY-MM-DD).
+        username (str): Nombre de usuario autenticado.
+
+    Returns:
+        List[dict]: Lista de registros de la máquina.
+
+    Raises:
+        HTTPException: Si la máquina no se encuentra (404) o si ocurre un error (500).
+    """
     try:
         conn = sqlite3.connect("database.db")
         cursor = conn.cursor()
         
         query = """
-            SELECT id, date, equipment_id, operation_mode, product_type, cycle_time,
-                   error_count, pressure, power_consumption, status, output_rate
+            SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
+                   vibration, temperature, defect_type, throughput, inventory_level
             FROM machines 
-            WHERE equipment_id = ?
+            WHERE machine = ?
         """
         
-        params = [equipment_id]
+        params = [machine]
         conditions = []
         
         if specific_date:
@@ -317,25 +354,27 @@ async def get_machine_records(
             records.append({
                 "id": row[0],
                 "date": row[1],
-                "equipment_id": row[2],
-                "operation_mode": row[3],
-                "product_type": row[4],
-                "cycle_time": row[5],
-                "error_count": row[6],
-                "pressure": row[7],
-                "power_consumption": row[8],
-                "status": row[9],
-                "output_rate": row[10]
+                "machine": row[2],
+                "production_line": row[3],
+                "material": row[4],
+                "batch_id": row[5],
+                "uptime": row[6],
+                "defects": row[7],
+                "vibration": row[8],
+                "temperature": row[9],
+                "defect_type": row[10],
+                "throughput": row[11],
+                "inventory_level": row[12]
             })
         
         if not records:
-            raise HTTPException(status_code=404, detail="Equipo no encontrado")
+            raise HTTPException(status_code=404, detail="Máquina no encontrada")
         
         return records
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to fetch equipment records: {str(e)}")
+        logger.error(f"Failed to fetch machine records: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
