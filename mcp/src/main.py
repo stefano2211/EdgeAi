@@ -84,7 +84,6 @@ def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
     return None
 
 def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dict:
-    """Verifica la cobertura de fechas en los registros."""
     if not data:
         return {
             "has_data": False,
@@ -499,6 +498,13 @@ def get_pdf_content(ctx: Context, filename: str) -> str:
 
 @mcp.tool()
 def list_fields(ctx: Context) -> str:
+    """Lista los campos disponibles en el dataset MES.
+    Returns:
+        str: JSON con los campos disponibles.
+            - `key_figures`: Lista de campos numéricos (e.g., ["temperature", "uptime"]).
+            - `key_values`: Diccionario de campos categóricos y sus valores posibles
+              (e.g., {"machine": ["ModelA", "ModelB"], "production_line": ["Line1", "Line2"]}).
+    """
     try:
         response = auth_client.get("/machines/")
         response.raise_for_status()
@@ -545,6 +551,9 @@ def fetch_mes_data(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
+    """
+        Obtiene datos MES con filtros dinámicos.
+    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
@@ -937,6 +946,22 @@ def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
+    """Analiza cumplimiento de datos MES contra reglas SOP/personalizadas.
+
+    Args:
+        ctx (Context): Contexto FastMCP.
+        key_values (Optional[Dict[str, str]]): Filtros categóricos (de `list_fields` `key_values`).
+            - Solo incluir campos solicitados por el usuario.
+            - Incluir `start_date` y `end_date` (YYYY-MM-DD) si se filtran fechas.
+            - Ejemplo (ilustrativo, usar `list_fields`): `{"machine": "ModelB", "start_date": "2025-04-09"}`
+            - Nota: No generar campos vacíos (e.g., `{"machine": ""}`).
+        key_figures (Optional[List[str]]): Campos numéricos (de `list_fields` `key_figures`).
+            - Usar los solicitados o todos los relevantes.
+            - Ejemplo (ilustrativo, usar `list_fields`): `["uptime", "vibration"]`
+
+    Instrucciones: Consultar `list_fields` para campos válidos. No usar ejemplos si no se piden.
+
+    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
