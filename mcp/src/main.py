@@ -1,6 +1,6 @@
 import httpx
 from mcp.server.fastmcp import FastMCP, Context
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Union
 import logging
 import re
@@ -112,8 +112,6 @@ def init_infrastructure():
     except Exception as e:
         logger.error(f"Infrastructure initialization failed: {str(e)}")
         raise
-
-
 
 class DataValidator:
     @staticmethod
@@ -465,48 +463,59 @@ def fetch_mes_data(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
+    """Obtiene datos MES de la API o Qdrant con filtrado dinámico.
+
+    Esta herramienta realiza las siguientes acciones:
+    1. Valida los campos solicitados usando DataValidator.
+    2. Consulta Qdrant con filtros dinámicos por key_values, manejando fechas como strings.
+    3. Si no hay datos en Qdrant, consulta la API MES y asegura que el campo 'date' esté presente.
+    4. Asigna fechas distribuidas en el rango start_date/end_date si falta 'date'.
+    5. Almacena los datos en Qdrant y devuelve los registros en formato JSON.
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
+            para filtrar (Ejemplo, {"machine": "ModelA", "production_line": "Line3", "start_date": "2025-04-09",
+            "end_date": "2025-04-11"}).
+        key_figures (Optional[List[str]]): Lista de campos numéricos a recuperar
+            (Ejemplo, ["temperature", "uptime"]).
+    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
         
         fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
         valid_values = fields_info["key_values"]
-        
-        identifier_field = None
-        identifier_value = None
-        if key_values:
-            for field in key_values:
-                if field in valid_values:
-                    identifier_field = field
-                    identifier_value = key_values[field]
-                    break
-        if not identifier_field and valid_values:
-            identifier_field = next(iter(valid_values))
-            identifier_value = key_values.get(identifier_field)
+        logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}")
 
+        # Preparar condiciones para Qdrant
         must_conditions = []
-        if identifier_field and identifier_value:
-            must_conditions.append(models.FieldCondition(key=identifier_field, match=models.MatchValue(value=identifier_value)))
+        if "machine" in key_values:
+            must_conditions.append(models.FieldCondition(key="machine", match=models.MatchValue(value=key_values["machine"])))
+        if "production_line" in key_values:
+            must_conditions.append(models.FieldCondition(key="production_line", match=models.MatchValue(value=key_values["production_line"])))
         if "start_date" in key_values and "end_date" in key_values:
+            start_date = key_values["start_date"]
+            end_date = key_values["end_date"]
             must_conditions.append(models.FieldCondition(
                 key="date",
-                range=models.Range(
-                    gte=datetime.strptime(key_values["start_date"], "%Y-%m-%d").timestamp(),
-                    lte=datetime.strptime(key_values["end_date"], "%Y-%m-%d").timestamp()
-                )
+                match=models.MatchAny(any=[(datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=i)).strftime("%Y-%m-%d")
+                                           for i in range((datetime.strptime(end_date, "%Y-%m-%d") - datetime.strptime(start_date, "%Y-%m-%d")).days + 1)])
             ))
         for k, v in key_values.items():
-            if k != identifier_field and k not in ["start_date", "end_date"]:
+            if k not in ["machine", "production_line", "start_date", "end_date"] and k in valid_values:
                 must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
 
+        # Consultar Qdrant
         qdrant_results = qdrant_client.scroll(
             collection_name="mes_logs",
             scroll_filter=models.Filter(must=must_conditions) if must_conditions else None,
             limit=1000
         )
-
         processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
+        logger.info(f"Fetched {len(processed_data)} records from Qdrant for {key_values}")
 
+        # Si no hay datos en Qdrant, consultar API MES
         if not processed_data:
             params = {}
             if "start_date" in key_values and "end_date" in key_values:
@@ -516,7 +525,7 @@ def fetch_mes_data(
                 })
             data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
 
-            endpoint = f"/machines/{identifier_value}" if identifier_field and identifier_value else "/machines/"
+            endpoint = f"/machines/{key_values['machine']}" if "machine" in key_values else "/machines/"
             response = auth_client.get(endpoint, params=params)
             response.raise_for_status()
             data = response.json()
@@ -524,11 +533,35 @@ def fetch_mes_data(
             processed_data = []
             for record in data:
                 if all(record.get(k) == v for k, v in data_filters.items()):
-                    item = {k: record[k] for k in record if k in key_figures or k in key_values}
-                    if identifier_field and identifier_field in record:
-                        item[identifier_field] = record[identifier_field]
+                    # Incluir date, key_figures, y key_values
+                    item = {"date": record.get("date", "")}
+                    for k in key_figures:
+                        if k in record:
+                            item[k] = record[k]
+                    for k in valid_values:
+                        if k in record:
+                            item[k] = record[k]
                     processed_data.append(item)
 
+            # Asignar fechas si falta 'date'
+            if processed_data and "start_date" in key_values and "end_date" in key_values:
+                start_date = datetime.strptime(key_values["start_date"], "%Y-%m-%d")
+                end_date = datetime.strptime(key_values["end_date"], "%Y-%m-%d")
+                delta = (end_date - start_date).days + 1
+                if delta > 0:
+                    for i, record in enumerate(processed_data):
+                        if not record["date"]:
+                            record["date"] = (start_date + timedelta(days=i % delta)).strftime("%Y-%m-%d")
+                else:
+                    for record in processed_data:
+                        if not record["date"]:
+                            record["date"] = "Desconocida"
+            else:
+                for record in processed_data:
+                    if not record["date"]:
+                        record["date"] = "Desconocida"
+
+            # Almacenar en Qdrant
             if processed_data:
                 points = [
                     models.PointStruct(
@@ -538,12 +571,18 @@ def fetch_mes_data(
                     ) for r in processed_data
                 ]
                 qdrant_client.upsert(collection_name="mes_logs", points=points)
+                logger.info(f"Stored {len(points)} points in Qdrant mes_logs")
 
-        logger.info(f"Fetched {len(processed_data)} records for {key_values}")
+        # Preparar respuesta
+        response_data = [
+            {k: r[k] for k in (["date"] + list(valid_values) + key_figures) if k in r}
+            for r in processed_data
+        ]
+
         return json.dumps({
             "status": "success",
-            "count": len(processed_data),
-            "data": processed_data
+            "count": len(response_data),
+            "data": response_data
         }, ensure_ascii=False)
 
     except Exception as e:
@@ -890,18 +929,21 @@ def analyze_compliance(
 
         results = []
         for record in fetch_result["data"]:
+            # Inicializar analysis con date y los key_values solicitados primero
             analysis = {
+                "date": record.get("date", "")
+            }
+            # Añadir solo los key_values solicitados (excluyendo start_date y end_date)
+            for k in key_values:
+                if k not in ["start_date", "end_date"] and k in record:
+                    analysis[k] = record[k]
+            
+            # Añadir métricas, cumplimiento y porcentaje después
+            analysis.update({
                 "metrics": {k: record[k] for k in key_figures if k in record},
                 "compliance": {},
-                "compliance_percentage": 0.0,
-                "date": record.get("date", ""),
-            }
-            # Incluir todos los key_values en los resultados
-            for k in valid_values:
-                if k in record:
-                    analysis[k] = record[k]
-            if identifier_field and identifier_field in record:
-                analysis[identifier_field] = record[identifier_field]
+                "compliance_percentage": 0.0
+            })
             
             compliant = 0
             total = 0
