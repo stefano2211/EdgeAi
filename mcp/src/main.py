@@ -47,20 +47,12 @@ minio_client = Minio(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Lista de formatos de fecha soportados
 DATE_FORMATS = [
-    "%Y-%m-%d",           # 2025-04-09
-    "%d/%m/%Y",           # 09/04/2025
-    "%m-%d-%Y",           # 04-09-2025
-    "%d-%m-%Y",           # 09-04-2025
-    "%Y%m%d",             # 20250409
-    "%Y/%m/%d",           # 2025/04/09
-    "%b %d, %Y",          # Apr 09, 2025
-    "%d %b %Y",           # 09 Apr 2025
+    "%Y-%m-%d", "%d/%m/%Y", "%m-%d-%Y", "%d-%m-%Y", "%Y%m%d",
+    "%Y/%m/%d", "%b %d, %Y", "%d %b %Y"
 ]
 
 def detect_and_normalize_date(date_str: str) -> Optional[str]:
-    """Intenta parsear una fecha en varios formatos y la normaliza a YYYY-MM-DD."""
     if not isinstance(date_str, str) or not date_str.strip():
         return None
     for fmt in DATE_FORMATS:
@@ -73,31 +65,64 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
     return None
 
 def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
-    """Identifica el campo que contiene fechas basado en nombres y valores."""
-    # Posibles nombres de campos de fecha
     date_field_candidates = ["date", "timestamp", "created_at", "record_date", "time", "datetime"]
-    
-    # Primero, buscar por nombres de campo
     key_values = fields_info.get("key_values", {})
     for field in key_values:
         if field.lower() in [c.lower() for c in date_field_candidates]:
-            # Verificar si los valores son fechas
             sample_values = [r.get(field) for r in records[:10] if field in r]
             valid_dates = [detect_and_normalize_date(str(v)) for v in sample_values]
             if any(valid_dates):
                 logger.info(f"Campo de fecha detectado por nombre: {field}")
                 return field
-    
-    # Si no se encuentra por nombre, analizar valores
     for field in key_values:
         sample_values = [r.get(field) for r in records[:10] if field in r]
         valid_dates = [detect_and_normalize_date(str(v)) for v in sample_values]
-        if len([d for d in valid_dates if d]) > len(sample_values) * 0.5:  # Más del 50% son fechas
+        if len([d for d in valid_dates if d]) > len(sample_values) * 0.5:
             logger.info(f"Campo de fecha detectado por valores: {field}")
             return field
-    
     logger.warning("No se detectó campo de fecha")
     return None
+
+def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dict:
+    """Verifica la cobertura de fechas en los registros."""
+    if not data:
+        return {
+            "has_data": False,
+            "covered_dates": [],
+            "message": f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
+        }
+    
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    expected_dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((end - start).days + 1)]
+    
+    covered_dates = sorted(set(r["date"] for r in data if r.get("date") and r["date"] != "Desconocida"))
+    
+    if not covered_dates:
+        return {
+            "has_data": False,
+            "covered_dates": [],
+            "message": f"No se encontraron registros con fechas válidas en el rango del {start_date} al {end_date}."
+        }
+    
+    has_start = start_date in covered_dates
+    has_end = end_date in covered_dates
+    missing_dates = [d for d in expected_dates if d not in covered_dates]
+    
+    if not missing_dates:
+        message = "Se encontraron registros para todas las fechas en el rango solicitado."
+    elif has_start and not has_end:
+        message = f"Se encontraron registros para {start_date}, pero no para {end_date} ni fechas posteriores en el rango."
+    elif covered_dates:
+        message = f"Solo se encontraron datos para las fechas {', '.join(covered_dates)} dentro del rango solicitado."
+    else:
+        message = f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
+    
+    return {
+        "has_data": bool(covered_dates),
+        "covered_dates": covered_dates,
+        "message": message
+    }
 
 class AuthClient:
     def __init__(self, base_url: str, username: str, password: str):
@@ -168,7 +193,6 @@ def init_infrastructure():
 class DataValidator:
     @staticmethod
     def validate_date(date_str: str, field: str) -> str:
-        """Valida y normaliza una fecha en múltiples formatos."""
         normalized_date = detect_and_normalize_date(date_str)
         if normalized_date is None:
             raise ValueError(f"Formato inválido para {field}: {date_str}. Formatos soportados: YYYY-MM-DD, DD/MM/YYYY, MM-DD-YYYY, etc.")
@@ -188,23 +212,28 @@ class DataValidator:
                 end_date = DataValidator.validate_date(key_values["end_date"], "end_date")
                 if start_date > end_date:
                     raise ValueError("start_date no puede ser posterior a end_date")
-                # Actualizar key_values con fechas normalizadas
                 key_values["start_date"] = start_date
                 key_values["end_date"] = end_date
 
+            errors = []
             invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
-            invalid_values = {
-                k: v for k, v in key_values.items()
-                if k not in fields_info["key_values"] and k not in ["start_date", "end_date"]
-                or (k in fields_info["key_values"] and v not in fields_info["key_values"].get(k, []))
-            }
-            
-            if invalid_figures or invalid_values:
-                errors = []
-                if invalid_figures:
-                    errors.append(f"Campos numéricos inválidos: {invalid_figures}")
-                if invalid_values:
-                    errors.append(f"Campos categóricos inválidos: {invalid_values}")
+            if invalid_figures:
+                valid_figures = fields_info["key_figures"]
+                errors.append(f"Campos numéricos inválidos: {invalid_figures}. Campos disponibles: {', '.join(valid_figures)}.")
+
+            invalid_values = {}
+            for k, v in key_values.items():
+                if k in ["start_date", "end_date"]:
+                    continue
+                if k not in fields_info["key_values"]:
+                    invalid_values[k] = v
+                    errors.append(f"Campo categórico inválido: '{k}'. Campos disponibles: {', '.join(fields_info['key_values'].keys())}.")
+                elif v not in fields_info["key_values"].get(k, []):
+                    invalid_values[k] = v
+                    valid_vals = fields_info["key_values"].get(k, [])
+                    errors.append(f"Valor inválido para '{k}': '{v}'. Valores válidos: {', '.join(valid_vals)}.")
+
+            if errors:
                 raise ValueError(" | ".join(errors))
             
             return fields_info
@@ -213,7 +242,6 @@ class DataValidator:
             raise
 
 def clean_ocr_text(content: str) -> str:
-    """Limpia artefactos OCR comunes y normaliza texto."""
     content = re.sub(r"\$_[0-9a-z]\$", "", content)
     content = content.replace("$_1$", "").replace("$_c$", "").replace("$_v$", "")
     content = re.sub(r"\s+", " ", content)
@@ -479,7 +507,7 @@ def list_fields(ctx: Context) -> str:
         if not records:
             return json.dumps({
                 "status": "no_data",
-                "message": "No records found in MES system",
+                "message": "No se encontraron registros en el sistema MES",
                 "key_figures": [],
                 "key_values": {}
             })
@@ -517,24 +545,6 @@ def fetch_mes_data(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Obtiene datos MES de la API o Qdrant con filtrado dinámico.
-
-    Esta herramienta realiza las siguientes acciones:
-    1. Valida los campos solicitados usando DataValidator.
-    2. Detecta dinámicamente el campo de fecha en los registros.
-    3. Consulta Qdrant con filtros dinámicos por key_values, manejando fechas como strings.
-    4. Si no hay datos en Qdrant, consulta la API MES y normaliza el campo de fecha.
-    5. Asigna fechas distribuidas en el rango start_date/end_date si falta.
-    6. Almacena los datos en Qdrant y devuelve los registros en formato JSON.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Ejemplo, {"machine": "ModelA", "production_line": "Line3", "start_date": "2025-04-09",
-            "end_date": "2025-04-11"}).
-        key_figures (Optional[List[str]]): Lista de campos numéricos a recuperar
-            (Ejemplo, ["temperature", "uptime"]).
-    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
@@ -543,7 +553,6 @@ def fetch_mes_data(
         valid_values = fields_info["key_values"]
         logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}")
 
-        # Preparar condiciones para Qdrant
         must_conditions = []
         if "machine" in key_values:
             must_conditions.append(models.FieldCondition(key="machine", match=models.MatchValue(value=key_values["machine"])))
@@ -563,7 +572,6 @@ def fetch_mes_data(
             if k not in ["machine", "production_line", "start_date", "end_date"] and k in valid_values:
                 must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
 
-        # Consultar Qdrant
         qdrant_results = qdrant_client.scroll(
             collection_name="mes_logs",
             scroll_filter=models.Filter(must=must_conditions) if must_conditions else None,
@@ -572,7 +580,6 @@ def fetch_mes_data(
         processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
         logger.info(f"Fetched {len(processed_data)} records from Qdrant for {key_values}")
 
-        # Si no hay datos en Qdrant, consultar API MES
         if not processed_data:
             params = {}
             if "start_date" in key_values and "end_date" in key_values:
@@ -587,7 +594,6 @@ def fetch_mes_data(
             response.raise_for_status()
             data = response.json()
 
-            # Detectar campo de fecha
             date_field = find_date_field(data, fields_info)
             logger.info(f"Campo de fecha detectado: {date_field}")
 
@@ -595,13 +601,11 @@ def fetch_mes_data(
             for record in data:
                 if all(record.get(k) == v for k, v in data_filters.items()):
                     item = {}
-                    # Normalizar fecha
                     if date_field and date_field in record:
                         normalized_date = detect_and_normalize_date(str(record[date_field]))
                         item["date"] = normalized_date or ""
                     else:
                         item["date"] = ""
-                    # Incluir key_figures y key_values
                     for k in key_figures:
                         if k in record:
                             item[k] = record[k]
@@ -610,7 +614,6 @@ def fetch_mes_data(
                             item[k] = record[k]
                     processed_data.append(item)
 
-            # Asignar fechas si falta
             if processed_data and "start_date" in key_values and "end_date" in key_values:
                 start_date = datetime.strptime(key_values["start_date"], "%Y-%m-%d")
                 end_date = datetime.strptime(key_values["end_date"], "%Y-%m-%d")
@@ -628,7 +631,6 @@ def fetch_mes_data(
                     if not record["date"]:
                         record["date"] = "Desconocida"
 
-            # Almacenar en Qdrant
             if processed_data:
                 points = [
                     models.PointStruct(
@@ -640,7 +642,19 @@ def fetch_mes_data(
                 qdrant_client.upsert(collection_name="mes_logs", points=points)
                 logger.info(f"Stored {len(points)} points in Qdrant mes_logs")
 
-        # Preparar respuesta
+        coverage = {"has_data": bool(processed_data), "covered_dates": [], "message": ""}
+        if processed_data and "start_date" in key_values and "end_date" in key_values:
+            coverage = check_date_coverage(processed_data, key_values["start_date"], key_values["end_date"])
+
+        if not processed_data:
+            return json.dumps({
+                "status": "no_data",
+                "count": 0,
+                "data": [],
+                "message": coverage["message"] or "No se encontraron registros para los filtros solicitados.",
+                "covered_dates": []
+            }, ensure_ascii=False)
+
         response_data = [
             {k: r[k] for k in (["date"] + list(valid_values) + key_figures) if k in r}
             for r in processed_data
@@ -649,7 +663,9 @@ def fetch_mes_data(
         return json.dumps({
             "status": "success",
             "count": len(response_data),
-            "data": response_data
+            "data": response_data,
+            "message": coverage["message"],
+            "covered_dates": coverage["covered_dates"]
         }, ensure_ascii=False)
 
     except Exception as e:
@@ -658,7 +674,8 @@ def fetch_mes_data(
             "status": "error",
             "message": str(e),
             "count": 0,
-            "data": []
+            "data": [],
+            "covered_dates": []
         }, ensure_ascii=False)
 
 @mcp.tool()
@@ -920,25 +937,6 @@ def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
-
-    Esta herramienta realiza las siguientes acciones:
-    1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
-    2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data.
-    3. Carga reglas SOP y personalizadas para las máquinas relevantes.
-    4. Filtra los datos por todos los key_values proporcionados.
-    5. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
-    6. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
-    7. Devuelve un informe detallado con resultados de cumplimiento.
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Ejemplo, {"machine": "ModelA", "production_line": "Line3", "start_date": "2025-04-09",
-            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
-        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (Ejemplo, ["temperature", "uptime"]).
-    """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
@@ -960,11 +958,27 @@ def analyze_compliance(
             identifier_value = key_values.get(identifier_field)
 
         fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures))
+        analysis_notes = [fetch_result.get("message", "")] if fetch_result.get("message") else []
+
+        if fetch_result["status"] == "no_data":
+            return json.dumps({
+                "status": "no_data",
+                "message": fetch_result["message"],
+                "period": f"{key_values.get('start_date', 'N/A')} to {key_values.get('end_date', 'N/A')}",
+                "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
+                "metrics_analyzed": key_figures,
+                "results": [],
+                "sop_coverage": "0/0 machines with SOP",
+                "custom_rules_applied": 0,
+                "analysis_notes": analysis_notes
+            }, ensure_ascii=False)
+
         if fetch_result["status"] != "success":
             return json.dumps({
                 "status": "error",
-                "message": fetch_result.get("message", "Data retrieval failed"),
-                "results": []
+                "message": fetch_result.get("message", "Error al obtener datos"),
+                "results": [],
+                "analysis_notes": analysis_notes
             }, ensure_ascii=False)
 
         filter_fields = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
@@ -973,6 +987,19 @@ def analyze_compliance(
                 r for r in fetch_result["data"]
                 if all(r.get(k) == v for k, v in filter_fields.items())
             ]
+            if not fetch_result["data"]:
+                analysis_notes.append(f"No se encontraron registros para los filtros: {', '.join(f'{k}={v}' for k, v in filter_fields.items())}.")
+                return json.dumps({
+                    "status": "no_data",
+                    "message": "No se encontraron registros para los filtros especificados.",
+                    "period": f"{key_values.get('start_date', 'N/A')} to {key_values.get('end_date', 'N/A')}",
+                    "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
+                    "metrics_analyzed": key_figures,
+                    "results": [],
+                    "sop_coverage": "0/0 machines with SOP",
+                    "custom_rules_applied": 0,
+                    "analysis_notes": analysis_notes
+                }, ensure_ascii=False)
             logger.info(f"Filtered data by {filter_fields}: {len(fetch_result['data'])} records")
 
         machines = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
@@ -1014,6 +1041,7 @@ def analyze_compliance(
             for field in key_figures:
                 if field not in record:
                     logger.warning(f"Field {field} not in record: {record}")
+                    analysis_notes.append(f"El campo '{field}' no está presente en el registro para la fecha {record.get('date', 'Desconocida')}.")
                     continue
                     
                 total += 1
@@ -1115,7 +1143,7 @@ def analyze_compliance(
             "results": results,
             "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(machines)} machines with SOP",
             "custom_rules_applied": len(custom_rules),
-            "analysis_notes": []
+            "analysis_notes": analysis_notes
         }, ensure_ascii=False)
 
     except Exception as e:
@@ -1123,7 +1151,8 @@ def analyze_compliance(
         return json.dumps({
             "status": "error",
             "message": str(e),
-            "results": []
+            "results": [],
+            "analysis_notes": [str(e)]
         }, ensure_ascii=False)
 
 if __name__ == "__main__":
