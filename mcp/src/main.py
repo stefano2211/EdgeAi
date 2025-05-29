@@ -47,6 +47,58 @@ minio_client = Minio(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Lista de formatos de fecha soportados
+DATE_FORMATS = [
+    "%Y-%m-%d",           # 2025-04-09
+    "%d/%m/%Y",           # 09/04/2025
+    "%m-%d-%Y",           # 04-09-2025
+    "%d-%m-%Y",           # 09-04-2025
+    "%Y%m%d",             # 20250409
+    "%Y/%m/%d",           # 2025/04/09
+    "%b %d, %Y",          # Apr 09, 2025
+    "%d %b %Y",           # 09 Apr 2025
+]
+
+def detect_and_normalize_date(date_str: str) -> Optional[str]:
+    """Intenta parsear una fecha en varios formatos y la normaliza a YYYY-MM-DD."""
+    if not isinstance(date_str, str) or not date_str.strip():
+        return None
+    for fmt in DATE_FORMATS:
+        try:
+            parsed_date = datetime.strptime(date_str.strip(), fmt)
+            return parsed_date.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    logger.warning(f"No se pudo parsear la fecha: {date_str}")
+    return None
+
+def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
+    """Identifica el campo que contiene fechas basado en nombres y valores."""
+    # Posibles nombres de campos de fecha
+    date_field_candidates = ["date", "timestamp", "created_at", "record_date", "time", "datetime"]
+    
+    # Primero, buscar por nombres de campo
+    key_values = fields_info.get("key_values", {})
+    for field in key_values:
+        if field.lower() in [c.lower() for c in date_field_candidates]:
+            # Verificar si los valores son fechas
+            sample_values = [r.get(field) for r in records[:10] if field in r]
+            valid_dates = [detect_and_normalize_date(str(v)) for v in sample_values]
+            if any(valid_dates):
+                logger.info(f"Campo de fecha detectado por nombre: {field}")
+                return field
+    
+    # Si no se encuentra por nombre, analizar valores
+    for field in key_values:
+        sample_values = [r.get(field) for r in records[:10] if field in r]
+        valid_dates = [detect_and_normalize_date(str(v)) for v in sample_values]
+        if len([d for d in valid_dates if d]) > len(sample_values) * 0.5:  # Más del 50% son fechas
+            logger.info(f"Campo de fecha detectado por valores: {field}")
+            return field
+    
+    logger.warning("No se detectó campo de fecha")
+    return None
+
 class AuthClient:
     def __init__(self, base_url: str, username: str, password: str):
         self.base_url = base_url
@@ -115,26 +167,30 @@ def init_infrastructure():
 
 class DataValidator:
     @staticmethod
-    def validate_date(date_str: str, field: str) -> None:
-        try:
-            datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError(f"Invalid format for {field}. Use YYYY-MM-DD: {date_str}")
+    def validate_date(date_str: str, field: str) -> str:
+        """Valida y normaliza una fecha en múltiples formatos."""
+        normalized_date = detect_and_normalize_date(date_str)
+        if normalized_date is None:
+            raise ValueError(f"Formato inválido para {field}: {date_str}. Formatos soportados: YYYY-MM-DD, DD/MM/YYYY, MM-DD-YYYY, etc.")
+        return normalized_date
 
     @staticmethod
     def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict[str, str]) -> Dict:
         try:
             fields_info = json.loads(list_fields(ctx))
             if fields_info["status"] != "success":
-                raise ValueError("Could not validate against API")
+                raise ValueError("No se pudo validar contra la API")
 
             if "start_date" in key_values or "end_date" in key_values:
                 if "start_date" not in key_values or "end_date" not in key_values:
-                    raise ValueError("Both start_date and end_date must be provided")
-                DataValidator.validate_date(key_values["start_date"], "start_date")
-                DataValidator.validate_date(key_values["end_date"], "end_date")
-                if key_values["start_date"] > key_values["end_date"]:
-                    raise ValueError("start_date cannot be later than end_date")
+                    raise ValueError("Se deben proporcionar tanto start_date como end_date")
+                start_date = DataValidator.validate_date(key_values["start_date"], "start_date")
+                end_date = DataValidator.validate_date(key_values["end_date"], "end_date")
+                if start_date > end_date:
+                    raise ValueError("start_date no puede ser posterior a end_date")
+                # Actualizar key_values con fechas normalizadas
+                key_values["start_date"] = start_date
+                key_values["end_date"] = end_date
 
             invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
             invalid_values = {
@@ -146,25 +202,25 @@ class DataValidator:
             if invalid_figures or invalid_values:
                 errors = []
                 if invalid_figures:
-                    errors.append(f"Invalid numeric fields: {invalid_figures}")
+                    errors.append(f"Campos numéricos inválidos: {invalid_figures}")
                 if invalid_values:
-                    errors.append(f"Invalid categorical fields: {invalid_values}")
+                    errors.append(f"Campos categóricos inválidos: {invalid_values}")
                 raise ValueError(" | ".join(errors))
             
             return fields_info
         except Exception as e:
-            logger.error(f"Field validation failed: {str(e)}")
+            logger.error(f"Fallo en validación de campos: {str(e)}")
             raise
 
 def clean_ocr_text(content: str) -> str:
     """Limpia artefactos OCR comunes y normaliza texto."""
-    content = re.sub(r"\$_[0-9a-z]\$", "", content)  # Elimina $_1$, $_c$, etc.
+    content = re.sub(r"\$_[0-9a-z]\$", "", content)
     content = content.replace("$_1$", "").replace("$_c$", "").replace("$_v$", "")
-    content = re.sub(r"\s+", " ", content)  # Normaliza espacios
-    content = content.replace("•", "").replace("◦", "")  # Elimina viñetas
-    content = re.sub(r"([a-zA-Z])\s+([a-zA-Z])", r"\1\2", content)  # Une palabras rotas (e.g., 'ime t' → 'imet')
-    content = content.replace("ime≤", "time ≤").replace("ount≤", "count ≤")  # Corrige cycle_time, error_count
-    content = content.replace("onsumption", "consumption").replace("ate≥", "rate ≥")  # Corrige power_consumption, output_rate
+    content = re.sub(r"\s+", " ", content)
+    content = content.replace("•", "").replace("◦", "")
+    content = re.sub(r"([a-zA-Z])\s+([a-zA-Z])", r"\1\2", content)
+    content = content.replace("ime≤", "time ≤").replace("ount≤", "count ≤")
+    content = content.replace("onsumption", "consumption").replace("ate≥", "rate ≥")
     content = content.replace(r"$<=$", "<=").replace(r"$>=$", ">=").replace(r"^{\circ}", "°").replace(r"\%", "%")
     content = re.sub(r"<[ ]*=", "<=", content)
     content = re.sub(r">+[ ]*=", ">=", content)
@@ -189,7 +245,7 @@ def detect_operator_between(param_end: int, value_start: int, sentence: str) -> 
     return ">="
 
 def detect_unit_near(value_end: int, param: str, sentence: str) -> str:
-    text_after = sentence[value_end:value_end + 20].lower()  # Ampliar ventana
+    text_after = sentence[value_end:value_end + 20].lower()
     unit_patterns = [
         (r"°[cf]", ["temperature"]),
         (r"mm/s|in/s|mm/sec", ["vibration"]),
@@ -282,7 +338,6 @@ def load_sop(machine: str) -> Dict:
                     if token.text.lower() in [s.lower() for s in synonyms]:
                         new_ents.append(Span(doc, token.i, token.i + 1, label="PARAM"))
                         break
-                # Detectar valores numéricos con o sin unidades
                 if re.match(r"\d+\.?\d*(?:[a-zA-Z/°%]+)?", token.text):
                     new_ents.append(Span(doc, token.i, token.i + 1, label="VALUE"))
             doc.ents = new_ents
@@ -319,7 +374,6 @@ def load_sop(machine: str) -> Dict:
                 selected_unit = ""
 
                 for value_text, value_start, value_end in value_ents:
-                    # Separar número y unidad
                     match = re.match(r"(\d+\.?\d*)([a-zA-Z/°%]+)?", value_text)
                     if not match:
                         logger.warning(f"Invalid value format: {value_text}")
@@ -467,10 +521,11 @@ def fetch_mes_data(
 
     Esta herramienta realiza las siguientes acciones:
     1. Valida los campos solicitados usando DataValidator.
-    2. Consulta Qdrant con filtros dinámicos por key_values, manejando fechas como strings.
-    3. Si no hay datos en Qdrant, consulta la API MES y asegura que el campo 'date' esté presente.
-    4. Asigna fechas distribuidas en el rango start_date/end_date si falta 'date'.
-    5. Almacena los datos en Qdrant y devuelve los registros en formato JSON.
+    2. Detecta dinámicamente el campo de fecha en los registros.
+    3. Consulta Qdrant con filtros dinámicos por key_values, manejando fechas como strings.
+    4. Si no hay datos en Qdrant, consulta la API MES y normaliza el campo de fecha.
+    5. Asigna fechas distribuidas en el rango start_date/end_date si falta.
+    6. Almacena los datos en Qdrant y devuelve los registros en formato JSON.
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
@@ -495,13 +550,15 @@ def fetch_mes_data(
         if "production_line" in key_values:
             must_conditions.append(models.FieldCondition(key="production_line", match=models.MatchValue(value=key_values["production_line"])))
         if "start_date" in key_values and "end_date" in key_values:
-            start_date = key_values["start_date"]
-            end_date = key_values["end_date"]
-            must_conditions.append(models.FieldCondition(
-                key="date",
-                match=models.MatchAny(any=[(datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=i)).strftime("%Y-%m-%d")
-                                           for i in range((datetime.strptime(end_date, "%Y-%m-%d") - datetime.strptime(start_date, "%Y-%m-%d")).days + 1)])
-            ))
+            start_date = datetime.strptime(key_values["start_date"], "%Y-%m-%d")
+            end_date = datetime.strptime(key_values["end_date"], "%Y-%m-%d")
+            delta = (end_date - start_date).days + 1
+            if delta > 0:
+                date_range = [(start_date + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta)]
+                must_conditions.append(models.FieldCondition(
+                    key="date",
+                    match=models.MatchAny(any=date_range)
+                ))
         for k, v in key_values.items():
             if k not in ["machine", "production_line", "start_date", "end_date"] and k in valid_values:
                 must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
@@ -530,11 +587,21 @@ def fetch_mes_data(
             response.raise_for_status()
             data = response.json()
 
+            # Detectar campo de fecha
+            date_field = find_date_field(data, fields_info)
+            logger.info(f"Campo de fecha detectado: {date_field}")
+
             processed_data = []
             for record in data:
                 if all(record.get(k) == v for k, v in data_filters.items()):
-                    # Incluir date, key_figures, y key_values
-                    item = {"date": record.get("date", "")}
+                    item = {}
+                    # Normalizar fecha
+                    if date_field and date_field in record:
+                        normalized_date = detect_and_normalize_date(str(record[date_field]))
+                        item["date"] = normalized_date or ""
+                    else:
+                        item["date"] = ""
+                    # Incluir key_figures y key_values
                     for k in key_figures:
                         if k in record:
                             item[k] = record[k]
@@ -543,7 +610,7 @@ def fetch_mes_data(
                             item[k] = record[k]
                     processed_data.append(item)
 
-            # Asignar fechas si falta 'date'
+            # Asignar fechas si falta
             if processed_data and "start_date" in key_values and "end_date" in key_values:
                 start_date = datetime.strptime(key_values["start_date"], "%Y-%m-%d")
                 end_date = datetime.strptime(key_values["end_date"], "%Y-%m-%d")
@@ -900,7 +967,6 @@ def analyze_compliance(
                 "results": []
             }, ensure_ascii=False)
 
-        # Filtrar dinámicamente por todos los key_values (excepto fechas)
         filter_fields = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
         if filter_fields:
             fetch_result["data"] = [
@@ -929,16 +995,13 @@ def analyze_compliance(
 
         results = []
         for record in fetch_result["data"]:
-            # Inicializar analysis con date y los key_values solicitados primero
             analysis = {
                 "date": record.get("date", "")
             }
-            # Añadir solo los key_values solicitados (excluyendo start_date y end_date)
             for k in key_values:
                 if k not in ["start_date", "end_date"] and k in record:
                     analysis[k] = record[k]
             
-            # Añadir métricas, cumplimiento y porcentaje después
             analysis.update({
                 "metrics": {k: record[k] for k in key_figures if k in record},
                 "compliance": {},
