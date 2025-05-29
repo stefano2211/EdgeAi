@@ -498,12 +498,8 @@ def get_pdf_content(ctx: Context, filename: str) -> str:
 
 @mcp.tool()
 def list_fields(ctx: Context) -> str:
-    """Lista los campos disponibles en el dataset MES.
-    Returns:
-        str: JSON con los campos disponibles.
-            - `key_figures`: Lista de campos numéricos (e.g., ["temperature", "uptime"]).
-            - `key_values`: Diccionario de campos categóricos y sus valores posibles
-              (e.g., {"machine": ["ModelA", "ModelB"], "production_line": ["Line1", "Line2"]}).
+    """
+    Lista los campos disponibles en el dataset MES.
     """
     try:
         response = auth_client.get("/machines/")
@@ -551,8 +547,7 @@ def fetch_mes_data(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """
-        Obtiene datos MES con filtros dinámicos.
+    """Obtiene datos MES con filtros dinámicos y almacena todos los registros en Qdrant.
     """
     try:
         key_values = key_values or {}
@@ -560,19 +555,35 @@ def fetch_mes_data(
         
         fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
         valid_values = fields_info["key_values"]
+        valid_figures = fields_info["key_figures"]
         logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}")
 
+        # Extraer fechas del contexto si no están en key_values
+        start_date = key_values.get("start_date")
+        end_date = key_values.get("end_date")
+        if not start_date or not end_date:
+            date_pattern = r"\d{4}-\d{2}-\d{2}"
+            dates = re.findall(date_pattern, ctx.query or "")
+            if len(dates) >= 2:
+                start_date = DataValidator.validate_date(dates[0], "start_date")
+                end_date = DataValidator.validate_date(dates[-1], "end_date")
+                if start_date and end_date and start_date <= end_date:
+                    key_values["start_date"] = start_date
+                    key_values["end_date"] = end_date
+                    logger.info(f"Extracted dates from query: start_date={start_date}, end_date={end_date}")
+
+        # Consultar Qdrant con filtros si se proporcionan
         must_conditions = []
         if "machine" in key_values:
             must_conditions.append(models.FieldCondition(key="machine", match=models.MatchValue(value=key_values["machine"])))
         if "production_line" in key_values:
             must_conditions.append(models.FieldCondition(key="production_line", match=models.MatchValue(value=key_values["production_line"])))
-        if "start_date" in key_values and "end_date" in key_values:
-            start_date = datetime.strptime(key_values["start_date"], "%Y-%m-%d")
-            end_date = datetime.strptime(key_values["end_date"], "%Y-%m-%d")
-            delta = (end_date - start_date).days + 1
+        if start_date and end_date:
+            start = datetime.strptime(start_date, "%Y-%m-%d")
+            end = datetime.strptime(end_date, "%Y-%m-%d")
+            delta = (end - start).days + 1
             if delta > 0:
-                date_range = [(start_date + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta)]
+                date_range = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta)]
                 must_conditions.append(models.FieldCondition(
                     key="date",
                     match=models.MatchAny(any=date_range)
@@ -589,73 +600,100 @@ def fetch_mes_data(
         processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
         logger.info(f"Fetched {len(processed_data)} records from Qdrant for {key_values}")
 
-        if not processed_data:
-            params = {}
-            if "start_date" in key_values and "end_date" in key_values:
-                params.update({
-                    "start_date": key_values["start_date"],
-                    "end_date": key_values["end_date"]
-                })
-            data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
+        # Consultar la API para obtener todos los registros
+        params = {}
+        if start_date and end_date:
+            params.update({
+                "start_date": start_date,
+                "end_date": end_date
+            })
+        response = auth_client.get("/machines/", params=params)
+        response.raise_for_status()
+        all_data = response.json()
 
-            endpoint = f"/machines/{key_values['machine']}" if "machine" in key_values else "/machines/"
-            response = auth_client.get(endpoint, params=params)
-            response.raise_for_status()
-            data = response.json()
+        date_field = find_date_field(all_data, fields_info)
+        logger.info(f"Campo de fecha detectado: {date_field}")
 
-            date_field = find_date_field(data, fields_info)
-            logger.info(f"Campo de fecha detectado: {date_field}")
-
-            processed_data = []
-            for record in data:
-                if all(record.get(k) == v for k, v in data_filters.items()):
-                    item = {}
-                    if date_field and date_field in record:
-                        normalized_date = detect_and_normalize_date(str(record[date_field]))
-                        item["date"] = normalized_date or ""
-                    else:
-                        item["date"] = ""
-                    for k in key_figures:
-                        if k in record:
-                            item[k] = record[k]
-                    for k in valid_values:
-                        if k in record:
-                            item[k] = record[k]
-                    processed_data.append(item)
-
-            if processed_data and "start_date" in key_values and "end_date" in key_values:
-                start_date = datetime.strptime(key_values["start_date"], "%Y-%m-%d")
-                end_date = datetime.strptime(key_values["end_date"], "%Y-%m-%d")
-                delta = (end_date - start_date).days + 1
-                if delta > 0:
-                    for i, record in enumerate(processed_data):
-                        if not record["date"]:
-                            record["date"] = (start_date + timedelta(days=i % delta)).strftime("%Y-%m-%d")
-                else:
-                    for record in processed_data:
-                        if not record["date"]:
-                            record["date"] = "Desconocida"
+        # Procesar todos los registros
+        full_data = []
+        for record in all_data:
+            item = {}
+            if date_field and date_field in record:
+                normalized_date = detect_and_normalize_date(str(record[date_field]))
+                item["date"] = normalized_date or ""
             else:
-                for record in processed_data:
+                item["date"] = ""
+            # Incluir todos los campos disponibles
+            for k in valid_figures:
+                if k in record:
+                    item[k] = record[k]
+            for k in valid_values:
+                if k in record:
+                    item[k] = record[k]
+            full_data.append(item)
+
+        # Asignar fechas si no están presentes
+        if full_data and start_date and end_date:
+            start = datetime.strptime(start_date, "%Y-%m-%d")
+            end = datetime.strptime(end_date, "%Y-%m-%d")
+            delta = (end - start).days + 1
+            if delta > 0:
+                for i, record in enumerate(full_data):
+                    if not record["date"]:
+                        record["date"] = (start + timedelta(days=i % delta)).strftime("%Y-%m-%d")
+            else:
+                for record in full_data:
                     if not record["date"]:
                         record["date"] = "Desconocida"
+        else:
+            for record in full_data:
+                if not record["date"]:
+                    record["date"] = "Desconocida"
 
-            if processed_data:
-                points = [
-                    models.PointStruct(
-                        id=hashlib.md5(json.dumps(r).encode()).hexdigest(),
-                        vector=model.encode(json.dumps(r)).tolist(),
-                        payload=r
-                    ) for r in processed_data
-                ]
-                qdrant_client.upsert(collection_name="mes_logs", points=points)
-                logger.info(f"Stored {len(points)} points in Qdrant mes_logs")
+        # Almacenar todos los registros en Qdrant
+        if full_data:
+            points = [
+                models.PointStruct(
+                    id=hashlib.md5(json.dumps(r).encode()).hexdigest(),
+                    vector=model.encode(json.dumps(r)).tolist(),
+                    payload=r
+                ) for r in full_data
+            ]
+            qdrant_client.upsert(collection_name="mes_logs", points=points)
+            logger.info(f"Stored {len(points)} points in Qdrant mes_logs")
 
-        coverage = {"has_data": bool(processed_data), "covered_dates": [], "message": ""}
-        if processed_data and "start_date" in key_values and "end_date" in key_values:
-            coverage = check_date_coverage(processed_data, key_values["start_date"], key_values["end_date"])
-
+        # Filtrar datos según key_values si no se obtuvo de Qdrant
         if not processed_data:
+            data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
+            processed_data = [
+                r for r in full_data
+                if all(r.get(k) == v for k, v in data_filters.items())
+            ]
+            logger.info(f"Filtered {len(processed_data)} records in memory for {data_filters}")
+
+        # Verificar si los campos clave están presentes
+        missing_keys = [k for k in key_figures if not any(k in r for r in processed_data)]
+        if missing_keys:
+            logger.warning(f"Missing key_figures in data: {missing_keys}")
+            return json.dumps({
+                "status": "no_data",
+                "count": 0,
+                "data": [],
+                "message": f"No se encontraron datos con los campos solicitados: {', '.join(missing_keys)}. Verifique la fuente de datos.",
+                "covered_dates": []
+            }, ensure_ascii=False)
+
+        # Preparar datos de respuesta
+        response_data = [
+            {k: r[k] for k in (["date"] + list(valid_values) + key_figures) if k in r}
+            for r in processed_data
+        ]
+
+        coverage = {"has_data": bool(response_data), "covered_dates": [], "message": ""}
+        if response_data and start_date and end_date:
+            coverage = check_date_coverage(response_data, start_date, end_date)
+
+        if not response_data:
             return json.dumps({
                 "status": "no_data",
                 "count": 0,
@@ -663,11 +701,6 @@ def fetch_mes_data(
                 "message": coverage["message"] or "No se encontraron registros para los filtros solicitados.",
                 "covered_dates": []
             }, ensure_ascii=False)
-
-        response_data = [
-            {k: r[k] for k in (["date"] + list(valid_values) + key_figures) if k in r}
-            for r in processed_data
-        ]
 
         return json.dumps({
             "status": "success",
@@ -960,7 +993,6 @@ def analyze_compliance(
             - Ejemplo (ilustrativo, usar `list_fields`): `["uptime", "vibration"]`
 
     Instrucciones: Consultar `list_fields` para campos válidos. No usar ejemplos si no se piden.
-
     """
     try:
         key_values = key_values or {}
