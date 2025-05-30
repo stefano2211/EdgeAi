@@ -547,7 +547,8 @@ def fetch_mes_data(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Obtiene datos MES con filtros dinámicos y almacena todos los registros en Qdrant.
+    """
+    Obtiene datos MES con filtros dinámicos y almacena todos los registros en Qdrant.
     """
     try:
         key_values = key_values or {}
@@ -572,12 +573,11 @@ def fetch_mes_data(
                     key_values["end_date"] = end_date
                     logger.info(f"Extracted dates from query: start_date={start_date}, end_date={end_date}")
 
-        # Consultar Qdrant con filtros si se proporcionan
+        # Consultar Qdrant con filtros para todos los key_values
         must_conditions = []
-        if "machine" in key_values:
-            must_conditions.append(models.FieldCondition(key="machine", match=models.MatchValue(value=key_values["machine"])))
-        if "production_line" in key_values:
-            must_conditions.append(models.FieldCondition(key="production_line", match=models.MatchValue(value=key_values["production_line"])))
+        for k, v in key_values.items():
+            if k not in ["start_date", "end_date"] and k in valid_values:
+                must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
         if start_date and end_date:
             start = datetime.strptime(start_date, "%Y-%m-%d")
             end = datetime.strptime(end_date, "%Y-%m-%d")
@@ -588,9 +588,6 @@ def fetch_mes_data(
                     key="date",
                     match=models.MatchAny(any=date_range)
                 ))
-        for k, v in key_values.items():
-            if k not in ["machine", "production_line", "start_date", "end_date"] and k in valid_values:
-                must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
 
         qdrant_results = qdrant_client.scroll(
             collection_name="mes_logs",
@@ -671,21 +668,22 @@ def fetch_mes_data(
             ]
             logger.info(f"Filtered {len(processed_data)} records in memory for {data_filters}")
 
-        # Verificar si los campos clave están presentes
-        missing_keys = [k for k in key_figures if not any(k in r for r in processed_data)]
-        if missing_keys:
-            logger.warning(f"Missing key_figures in data: {missing_keys}")
+        # Verificar si los key_figures están presentes
+        missing_figures = [k for k in key_figures if not any(k in r for r in processed_data)]
+        if missing_figures:
+            logger.warning(f"Missing key_figures in data: {missing_figures}")
             return json.dumps({
                 "status": "no_data",
                 "count": 0,
                 "data": [],
-                "message": f"No se encontraron datos con los campos solicitados: {', '.join(missing_keys)}. Verifique la fuente de datos.",
+                "message": f"No se encontraron datos con los campos solicitados: {', '.join(missing_figures)}. Verifique la fuente de datos.",
                 "covered_dates": []
             }, ensure_ascii=False)
 
-        # Preparar datos de respuesta
+        # Preparar datos de respuesta con solo los key_values solicitados
+        requested_key_values = [k for k in key_values if k not in ["start_date", "end_date"]]
         response_data = [
-            {k: r[k] for k in (["date"] + list(valid_values) + key_figures) if k in r}
+            {k: r[k] for k in (["date"] + requested_key_values + key_figures) if k in r}
             for r in processed_data
         ]
 
@@ -730,6 +728,41 @@ def add_custom_rule(
     unit: Optional[str] = None,
     description: str = ""
 ) -> str:
+    """Añade una regla de cumplimiento personalizada para múltiples máquinas y métricas.
+
+    Versión mejorada que acepta:
+    - Dict: {"temperature": 70.0, "pressure": 1.2}
+    - String: "temperature=70,pressure=1.2" o "temperature:70,pressure:1.2"
+
+    Args:
+        ctx (Context): Contexto de la solicitud FastMCP.
+        machines (Union[List[str], str]): Lista de máquinas o string JSON.
+            Ejemplo válido: ["ModelA"] o '["ModelA", "ModelB"]'
+        key_figures (Union[Dict[str, float], str]): Métricas y valores umbral.
+            Ejemplos válidos:
+            - {"temperature": 70.0, "pressure": 1.2}
+            - "temperature=70,pressure=1.2"
+            - "temperature:70,pressure:1.2"
+        key_values (Optional[Dict[str, str]]): Filtros categóricos.
+            Ejemplo: {"material": "Steel", "batch": "A123"}
+        operator (str): Operador de comparación (>=, <=, >, <, ==, !=).
+        unit (Optional[str]): Unidad de medida común para todas las métricas.
+        description (str): Descripción de la regla.
+
+    Returns:
+        str: JSON con estado y detalles de la regla creada.
+
+    Ejemplo de uso LLM:
+        ```json
+        {
+            "machines": ["ModelA"],
+            "key_figures": {"temperature": 70.0},
+            "operator": ">=",
+            "unit": "°C",
+            "description": "Temperatura mínima requerida"
+        }
+        ```
+    """
     try:
         if isinstance(machines, str):
             try:
@@ -979,20 +1012,23 @@ def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Analiza cumplimiento de datos MES contra reglas SOP/personalizadas.
+    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
+
+    Esta herramienta realiza las siguientes acciones:
+    1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
+    2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data.
+    3. Carga reglas SOP y personalizadas para las máquinas relevantes.
+    4. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
+    5. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
+    6. Devuelve un informe detallado con resultados de cumplimiento.
 
     Args:
-        ctx (Context): Contexto FastMCP.
-        key_values (Optional[Dict[str, str]]): Filtros categóricos (de `list_fields` `key_values`).
-            - Solo incluir campos solicitados por el usuario.
-            - Incluir `start_date` y `end_date` (YYYY-MM-DD) si se filtran fechas.
-            - Ejemplo (ilustrativo, usar `list_fields`): `{"machine": "ModelB", "start_date": "2025-04-09"}`
-            - Nota: No generar campos vacíos (e.g., `{"machine": ""}`).
-        key_figures (Optional[List[str]]): Campos numéricos (de `list_fields` `key_figures`).
-            - Usar los solicitados o todos los relevantes.
-            - Ejemplo (ilustrativo, usar `list_fields`): `["uptime", "vibration"]`
-
-    Instrucciones: Consultar `list_fields` para campos válidos. No usar ejemplos si no se piden.
+        ctx (Context): Contexto de la solicitud FastMCP.
+        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
+            para filtrar (Example, {"machine": "ModelA", "production_line":"Line1", "start_date": "2025-04-09",
+            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
+        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
+            (Example, ["temperature", "uptime"]).
     """
     try:
         key_values = key_values or {}
