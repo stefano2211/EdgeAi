@@ -562,16 +562,7 @@ def fetch_mes_data(
         # Extraer fechas del contexto si no están en key_values
         start_date = key_values.get("start_date")
         end_date = key_values.get("end_date")
-        if not start_date or not end_date:
-            date_pattern = r"\d{4}-\d{2}-\d{2}"
-            dates = re.findall(date_pattern, ctx.query or "")
-            if len(dates) >= 2:
-                start_date = DataValidator.validate_date(dates[0], "start_date")
-                end_date = DataValidator.validate_date(dates[-1], "end_date")
-                if start_date and end_date and start_date <= end_date:
-                    key_values["start_date"] = start_date
-                    key_values["end_date"] = end_date
-                    logger.info(f"Extracted dates from query: start_date={start_date}, end_date={end_date}")
+        
 
         # Consultar Qdrant con filtros para todos los key_values
         must_conditions = []
@@ -1012,23 +1003,59 @@ def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None
 ) -> str:
-    """Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
+    """
+    Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
 
-    Esta herramienta realiza las siguientes acciones:
-    1. Valida los campos solicitados (key_figures y key_values) usando DataValidator.
-    2. Obtiene datos de la API MES o Qdrant usando fetch_mes_data.
-    3. Carga reglas SOP y personalizadas para las máquinas relevantes.
-    4. Compara cada registro contra todas las reglas, aplicando filtros de key_values.
-    5. Calcula un porcentaje de cumplimiento por registro (basado solo en reglas SOP).
-    6. Devuelve un informe detallado con resultados de cumplimiento.
+    INSTRUCCIONES PARA EL LLM:
+    1. Antes de construir la consulta, llama a la función `list_fields` para obtener los campos disponibles en el dataset MES.
+    2. Usa los campos listados en `key_figures` (campos numéricos) y `key_values` (campos categóricos) para armar la consulta.
+    3. Solo utiliza campos que estén presentes en la respuesta de `list_fields`.
+    4. La estructura de la consulta debe ser:
+
+        {
+            "key_values": {
+                "<campo_categórico_1>": "<valor>",
+                "<campo_categórico_2>": "<valor>",
+                "start_date": "2025-04-09",
+                "end_date": "2025-04-11"
+            },
+            "key_figures": [
+                "<campo_numérico_1>",
+                "<campo_numérico_2>"
+            ]
+        }
+
+    5. Ejemplo dinámico (los campos deben ser seleccionados de la respuesta de `list_fields`):
+
+        Supón que `list_fields` devuelve:
+        {
+            "key_figures": ["temperature", "uptime", "vibration"],
+            "key_values": {
+                "machine": ["ModelA", "ModelB"],
+                "production_line": ["Line1", "Line2", "Line3"]
+            }
+        }
+
+        Entonces, una consulta válida sería:
+        {
+            "key_values": {
+                "machine": "ModelA",
+                "production_line": "Line3",
+                "start_date": "2025-04-09",
+                "end_date": "2025-04-11"
+            },
+            "key_figures": ["temperature", "uptime", "vibration"]
+        }
+
+    6. No inventes campos ni valores. Siempre consulta primero `list_fields` y utiliza solo los campos y valores permitidos.
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores
-            para filtrar (Example, {"machine": "ModelA", "production_line":"Line1", "start_date": "2025-04-09",
-            "end_date": "2025-04-11"}). Las fechas deben estar en formato YYYY-MM-DD.
-        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar
-            (Example, ["temperature", "uptime"]).
+        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores para filtrar.
+        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar.
+
+    Returns:
+        str: JSON con el análisis de cumplimiento.
     """
     try:
         key_values = key_values or {}
