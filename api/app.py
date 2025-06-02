@@ -40,7 +40,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS machines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
-                equipment_id TEXT NOT NULL,
+                machine TEXT NOT NULL,
                 operation_mode TEXT NOT NULL,
                 product_type TEXT NOT NULL,
                 cycle_time REAL NOT NULL,
@@ -89,7 +89,7 @@ def init_db():
             ]
             cursor.executemany("""
                 INSERT INTO machines (
-                    date, equipment_id, operation_mode, product_type, cycle_time,
+                    date, machine, operation_mode, product_type, cycle_time,
                     error_count, pressure, power_consumption, status, output_rate
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, fixed_records)
@@ -222,7 +222,7 @@ async def get_all_machines(
         cursor = conn.cursor()
         
         base_query = """
-            SELECT id, date, equipment_id, operation_mode, product_type, cycle_time,
+            SELECT id, date, machine, operation_mode, product_type, cycle_time,
                    error_count, pressure, power_consumption, status, output_rate
             FROM machines
         """
@@ -254,7 +254,7 @@ async def get_all_machines(
             records.append({
                 "id": row[0],
                 "date": row[1],
-                "equipment_id": row[2],
+                "machine": row[2],
                 "operation_mode": row[3],
                 "product_type": row[4],
                 "cycle_time": row[5],
@@ -271,9 +271,9 @@ async def get_all_machines(
     finally:
         conn.close()
 
-@app.get("/machines/{equipment_id}")
+@app.get("/machines/{machine}")
 async def get_machine_records(
-    equipment_id: str,
+    machine: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     specific_date: Optional[str] = None,
@@ -285,13 +285,13 @@ async def get_machine_records(
         cursor = conn.cursor()
         
         query = """
-            SELECT id, date, equipment_id, operation_mode, product_type, cycle_time,
+            SELECT id, date, machine, operation_mode, product_type, cycle_time,
                    error_count, pressure, power_consumption, status, output_rate
             FROM machines 
-            WHERE equipment_id = ?
+            WHERE machine = ?
         """
         
-        params = [equipment_id]
+        params = [machine]
         conditions = []
         
         if specific_date:
@@ -317,7 +317,7 @@ async def get_machine_records(
             records.append({
                 "id": row[0],
                 "date": row[1],
-                "equipment_id": row[2],
+                "machine": row[2],
                 "operation_mode": row[3],
                 "product_type": row[4],
                 "cycle_time": row[5],
