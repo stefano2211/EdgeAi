@@ -5,17 +5,21 @@ from typing import Optional, List, Dict, Union
 import logging
 import json
 import hashlib
+import re
 from minio import Minio
 from minio.error import S3Error
 import pdfplumber
 import io
 import os
-import re
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer
 
-# Configuración existente (sin cambios)
+# Configuración del logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuración del MCP
 mcp = FastMCP("Manufacturing Compliance Processor")
 API_URL = os.getenv("API_URL", "http://api:5000")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
@@ -25,6 +29,7 @@ MINIO_BUCKET = os.getenv("MINIO_BUCKET", "sop-pdfs")
 API_USERNAME = "admin"
 API_PASSWORD = "password123"
 
+# Inicialización de clientes
 model = SentenceTransformer('all-MiniLM-L6-v2')
 qdrant_client = QdrantClient(host="qdrant", port=6333)
 minio_client = Minio(
@@ -34,10 +39,10 @@ minio_client = Minio(
     secure=False
 )
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Caché para el campo de fecha
+DATE_FIELD_CACHE = {"field": None, "schema_hash": None}
 
-# Clases y funciones existentes (sin cambios)
+# Formatos de fecha soportados
 DATE_FORMATS = [
     "%Y-%m-%d", "%d/%m/%Y", "%m-%d-%Y", "%d-%m-%Y", "%Y%m%d",
     "%Y/%m/%d", "%b %d, %Y", "%d %b %Y", "%Y-%m-%d %H:%M:%S",
@@ -45,7 +50,13 @@ DATE_FORMATS = [
 ]
 
 def detect_and_normalize_date(date_str: str) -> Optional[str]:
+    """
+    Detecta y normaliza una cadena de fecha al formato YYYY-MM-DD.
+    """
     if not isinstance(date_str, str) or not date_str.strip():
+        return None
+    # Evitar procesar valores claramente no relacionados con fechas
+    if any(keyword in date_str.lower() for keyword in ["model", "line", "batch", "aluminum", "steel", "plastic", "copper", "brass", "titanium", "chip", "crack", "dent", "scratch", "warp", "none"]):
         return None
     for fmt in DATE_FORMATS:
         try:
@@ -56,21 +67,41 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
     match = re.match(r"(\d{4}-\d{2}-\d{2})(?:\s+\d{2}:\d{2}(?::\d{2})?)?", date_str)
     if match:
         return match.group(1)
-    logger.warning(f"No se pudo parsear la fecha: {date_str}")
+    logger.debug(f"No se pudo parsear la fecha: {date_str}")
     return None
 
 def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
+    """
+    Detecta el campo que contiene fechas en los registros.
+    Retorna el campo cacheado si está disponible y el esquema no ha cambiado.
+    """
+    global DATE_FIELD_CACHE
     if not records or not fields_info:
         logger.warning("No records or fields_info provided for date detection")
         return None
+
+    # Generar un hash del esquema para detectar cambios
+    schema = json.dumps(fields_info, sort_keys=True)
+    schema_hash = hashlib.md5(schema.encode()).hexdigest()
+
+    # Usar el campo cacheado si el esquema no ha cambiado
+    if DATE_FIELD_CACHE["field"] and DATE_FIELD_CACHE["schema_hash"] == schema_hash:
+        logger.info(f"Using cached date field: {DATE_FIELD_CACHE['field']}")
+        return DATE_FIELD_CACHE["field"]
+
     key_values = fields_info.get("key_values", {})
     if not key_values:
         logger.warning("No categorical fields available in fields_info")
         return None
+
     best_candidate = None
     best_score = 0
+    # Limitar a los primeros 10 registros para mejorar el rendimiento
     for field in key_values.keys():
-        sample_values = [r.get(field) for r in records[:50] if field in r]
+        # Excluir campos claramente no relacionados con fechas
+        if any(keyword in field.lower() for keyword in ["machine", "production_line", "material", "batch_id", "defect_type"]):
+            continue
+        sample_values = [r.get(field) for r in records[:10] if field in r]
         if not sample_values:
             continue
         valid_dates = [detect_and_normalize_date(str(v)) for v in sample_values]
@@ -82,14 +113,21 @@ def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
         if score > best_score:
             best_score = score
             best_candidate = field
+
     if best_candidate and best_score >= 0.5:
         logger.info(f"Date field detected: {best_candidate} (score: {best_score})")
+        # Actualizar el caché
+        DATE_FIELD_CACHE["field"] = best_candidate
+        DATE_FIELD_CACHE["schema_hash"] = schema_hash
         return best_candidate
     else:
         logger.warning("No date field detected in the provided records")
         return None
 
 def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dict:
+    """
+    Verifica la cobertura de fechas en los datos.
+    """
     if not data:
         return {
             "has_data": False,
@@ -124,6 +162,9 @@ def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dic
     }
 
 class AuthClient:
+    """
+    Cliente para autenticación con la API.
+    """
     def __init__(self, base_url: str, username: str, password: str):
         self.base_url = base_url
         self.username = username
@@ -175,6 +216,9 @@ class AuthClient:
 auth_client = None
 
 def init_infrastructure():
+    """
+    Inicializa la infraestructura (Qdrant, MinIO, AuthClient).
+    """
     global auth_client
     try:
         vector_config = models.VectorParams(size=384, distance=models.Distance.COSINE)
@@ -189,6 +233,9 @@ def init_infrastructure():
         raise
 
 class DataValidator:
+    """
+    Valida campos y fechas.
+    """
     @staticmethod
     def validate_date(date_str: str, field: str) -> str:
         normalized_date = detect_and_normalize_date(date_str)
@@ -234,9 +281,11 @@ class DataValidator:
             logger.error(f"Fallo en validación de campos: {str(e)}")
             raise
 
-# Funciones existentes sin cambios
 @mcp.tool()
 def get_pdf_content(ctx: Context, filename: str) -> str:
+    """
+    Obtiene el contenido de un PDF desde MinIO.
+    """
     try:
         try:
             response = minio_client.get_object(MINIO_BUCKET, filename)
@@ -270,7 +319,7 @@ def get_pdf_content(ctx: Context, filename: str) -> str:
 @mcp.tool()
 def list_fields(ctx: Context) -> str:
     """
-    Lista los campos disponibles en el dataset MES.
+    Lista los campos disponibles en la API MES.
     """
     try:
         response = auth_client.get("/machines/")
@@ -314,7 +363,7 @@ def fetch_mes_data(
     key_figures: Optional[List[str]] = None
 ) -> str:
     """
-    Obtiene datos MES con filtros dinámicos y almacena todos los registros en Qdrant.
+    Recupera datos MES de la API y Qdrant.
     """
     try:
         key_values = key_values or {}
@@ -442,7 +491,6 @@ def fetch_mes_data(
             "covered_dates": []
         }, ensure_ascii=False)
 
-# Funciones de reglas personalizadas (sin cambios)
 @mcp.tool()
 def add_custom_rule(
     ctx: Context,
@@ -453,23 +501,8 @@ def add_custom_rule(
     unit: Optional[str] = None,
     description: str = ""
 ) -> str:
-    """Añade una regla de cumplimiento personalizada para múltiples máquinas y métricas.
-
-       Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        machines (Union[List[str], str]): Lista de máquinas o string JSON.
-            Ejemplo válido: ["ModelA"] o '["ModelA", "ModelB"]'
-        key_figures (Union[Dict[str, float], str]): Métricas y valores umbral.
-            Ejemplos válidos:
-            - {"temperature": 70.0, "pressure": 1.2}
-            - "temperature=70,pressure=1.2"
-            - "temperature:70,pressure:1.2"
-        key_values (Optional[Dict[str, str]]): Filtros categóricos.
-            Ejemplo: {"material": "Steel", "batch": "A123"}
-        operator (str): Operador de comparación (>=, <=, >, <, ==, !=).
-        unit (Optional[str]): Unidad de medida común para todas las métricas.
-        description (str): Descripción de la regla.
-
+    """
+    Añade una regla personalizada a Qdrant.
     """
     try:
         if isinstance(machines, str):
@@ -585,6 +618,9 @@ def list_custom_rules(
     machine: Optional[str] = None,
     limit: int = 10
 ) -> str:
+    """
+    Lista las reglas personalizadas almacenadas en Qdrant.
+    """
     try:
         filter_conditions = []
         if rule_id:
@@ -648,6 +684,9 @@ def delete_custom_rule(
     ctx: Context,
     rule_id: str
 ) -> str:
+    """
+    Elimina una regla personalizada de Qdrant.
+    """
     try:
         existing = qdrant_client.retrieve(
             collection_name="custom_rules",
@@ -687,7 +726,6 @@ def delete_custom_rule(
             "rule_id": rule_id
         }, ensure_ascii=False)
 
-# Función modificada: analyze_compliance
 @mcp.tool()
 def analyze_compliance(
     ctx: Context,
@@ -737,8 +775,6 @@ def analyze_compliance(
             },
             "key_figures": ["temperature", "uptime", "vibration"]
         }
-
-    6. No inventes campos ni valores. Siempre consulta primero `list_fields` y utiliza solo los campos y valores permitidos.
 
     Args:
         ctx (Context): Contexto de la solicitud FastMCP.
