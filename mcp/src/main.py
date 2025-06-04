@@ -55,7 +55,7 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
     """
     if not isinstance(date_str, str) or not date_str.strip():
         return None
-    # Evitar procesar valores claramente no relacionados con fechas
+    # Filtrar valores claramente no relacionados con fechas
     if any(keyword in date_str.lower() for keyword in ["model", "line", "batch", "aluminum", "steel", "plastic", "copper", "brass", "titanium", "chip", "crack", "dent", "scratch", "warp", "none"]):
         return None
     for fmt in DATE_FORMATS:
@@ -67,24 +67,24 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
     match = re.match(r"(\d{4}-\d{2}-\d{2})(?:\s+\d{2}:\d{2}(?::\d{2})?)?", date_str)
     if match:
         return match.group(1)
-    logger.debug(f"No se pudo parsear la fecha: {date_str}")
+    logger.warning(f"No se pudo parsear la fecha: {date_str}")
     return None
 
 def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
     """
     Detecta el campo que contiene fechas en los registros.
-    Retorna el campo cacheado si está disponible y el esquema no ha cambiado.
+    Usa el campo cacheado si está disponible y el esquema no ha cambiado.
     """
     global DATE_FIELD_CACHE
     if not records or not fields_info:
         logger.warning("No records or fields_info provided for date detection")
         return None
 
-    # Generar un hash del esquema para detectar cambios
+    # Generar hash del esquema
     schema = json.dumps(fields_info, sort_keys=True)
     schema_hash = hashlib.md5(schema.encode()).hexdigest()
 
-    # Usar el campo cacheado si el esquema no ha cambiado
+    # Usar caché si es válido
     if DATE_FIELD_CACHE["field"] and DATE_FIELD_CACHE["schema_hash"] == schema_hash:
         logger.info(f"Using cached date field: {DATE_FIELD_CACHE['field']}")
         return DATE_FIELD_CACHE["field"]
@@ -96,9 +96,9 @@ def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
 
     best_candidate = None
     best_score = 0
-    # Limitar a los primeros 10 registros para mejorar el rendimiento
+    # Limitar a 10 registros
     for field in key_values.keys():
-        # Excluir campos claramente no relacionados con fechas
+        # Excluir campos no relacionados con fechas
         if any(keyword in field.lower() for keyword in ["machine", "production_line", "material", "batch_id", "defect_type"]):
             continue
         sample_values = [r.get(field) for r in records[:10] if field in r]
@@ -116,7 +116,6 @@ def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
 
     if best_candidate and best_score >= 0.5:
         logger.info(f"Date field detected: {best_candidate} (score: {best_score})")
-        # Actualizar el caché
         DATE_FIELD_CACHE["field"] = best_candidate
         DATE_FIELD_CACHE["schema_hash"] = schema_hash
         return best_candidate
@@ -205,9 +204,35 @@ class AuthClient:
                     headers=headers,
                     params=params
                 )
+            logger.info(f"HTTP Request: GET {self.base_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
             return response
         except Exception as e:
             logger.error(f"Error en solicitud GET: {str(e)}")
+            raise
+
+    def post(self, endpoint: str, json_data: Optional[Dict] = None) -> httpx.Response:
+        if not self.token:
+            self.authenticate()
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            response = self.client.post(
+                f"{self.base_url}{endpoint}",
+                headers=headers,
+                json=json_data
+            )
+            if response.status_code == 401:
+                logger.info("Token inválido, reautenticando...")
+                self.authenticate()
+                headers = {"Authorization": f"Bearer {self.token}"}
+                response = self.client.post(
+                    f"{self.base_url}{endpoint}",
+                    headers=headers,
+                    json=json_data
+                )
+            logger.info(f"HTTP Request: POST {self.base_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
+            return response
+        except Exception as e:
+            logger.error(f"Error en solicitud POST: {str(e)}")
             raise
 
     def close(self):
@@ -294,6 +319,7 @@ def get_pdf_content(ctx: Context, filename: str) -> str:
             response.release_conn()
         except S3Error as e:
             available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
+            logger.error(f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}")
             return json.dumps({
                 "status": "error",
                 "message": f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}",
@@ -326,6 +352,7 @@ def list_fields(ctx: Context) -> str:
         response.raise_for_status()
         records = response.json()
         if not records:
+            logger.warning("No se encontraron registros en el sistema MES")
             return json.dumps({
                 "status": "no_data",
                 "message": "No se encontraron registros en el sistema MES",
@@ -586,6 +613,7 @@ def add_custom_rule(
         message = f"Rule added for {len(machines)} machine(s): {metrics_desc}"
         if filters_desc:
             message += f" | Filters: {filters_desc}"
+        logger.info(message)
         return json.dumps({
             "status": "success",
             "message": message,
@@ -658,6 +686,7 @@ def list_custom_rules(
                 "applies_to": f"{len(rule.payload.get('machines', []))} machines",
                 "metrics": list(rule.payload.get("key_figures", {}).keys())
             })
+        logger.info(f"Retrieved {len(formatted_rules)} custom rules")
         return json.dumps({
             "status": "success",
             "count": len(formatted_rules),
@@ -694,6 +723,7 @@ def delete_custom_rule(
             with_payload=True
         )
         if not existing:
+            logger.error(f"Rule with ID {rule_id} not found")
             return json.dumps({
                 "status": "error",
                 "message": f"Rule with ID {rule_id} not found"
@@ -707,6 +737,7 @@ def delete_custom_rule(
         rule_data = existing[0].payload
         metrics = list(rule_data.get("key_figures", {}).keys())
         machines = rule_data.get("machines", [])
+        logger.info(f"Rule deleted: {', '.join(metrics)} for {len(machines)} machine(s)")
         return json.dumps({
             "status": "success",
             "message": f"Rule deleted: {', '.join(metrics)} for {len(machines)} machine(s)",
@@ -809,6 +840,7 @@ def analyze_compliance(
         analysis_notes = [fetch_result.get("message", "")] if fetch_result.get("message") else []
 
         if fetch_result["status"] == "no_data":
+            logger.warning(fetch_result["message"])
             return json.dumps({
                 "status": "no_data",
                 "message": fetch_result["message"],
@@ -822,6 +854,7 @@ def analyze_compliance(
             }, ensure_ascii=False)
 
         if fetch_result["status"] != "success":
+            logger.error(fetch_result.get("message", "Error retrieving data"))
             return json.dumps({
                 "status": "error",
                 "message": fetch_result.get("message", "Error retrieving data"),
@@ -843,13 +876,15 @@ def analyze_compliance(
                 pdf_result = json.loads(get_pdf_content(ctx, f"{identifier}.pdf"))
                 if pdf_result["status"] == "success":
                     sop_content[identifier] = pdf_result["content"]
+                    logger.info(f"SOP content for {identifier_field}={identifier}: {sop_content[identifier][:100]}...")
                 else:
                     sop_content[identifier] = ""
                     analysis_notes.append(f"Failed to load SOP for {identifier}: {pdf_result['message']}")
-                logger.info(f"SOP content for {identifier_field}={identifier}: {sop_content[identifier][:100]}...")
+                    logger.warning(f"Failed to load SOP for {identifier}: {pdf_result['message']}")
             else:
                 sop_content[identifier] = ""
                 analysis_notes.append(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
+                logger.info(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
 
         # Obtener reglas personalizadas
         custom_rules = []
