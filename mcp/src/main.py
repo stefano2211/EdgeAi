@@ -3,10 +3,6 @@ from mcp.server.fastmcp import FastMCP, Context
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Union
 import logging
-import re
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
-from qdrant_client.http import models
 import json
 import hashlib
 from minio import Minio
@@ -14,19 +10,13 @@ from minio.error import S3Error
 import pdfplumber
 import io
 import os
-import spacy
-from spacy.language import Language
-from spacy.tokens import Span
+import re
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+from sentence_transformers import SentenceTransformer
 
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    import subprocess
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
-    nlp = spacy.load("en_core_web_sm")
-
+# Configuración existente (sin cambios)
 mcp = FastMCP("Manufacturing Compliance Processor")
-
 API_URL = os.getenv("API_URL", "http://api:5000")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
@@ -47,6 +37,7 @@ minio_client = Minio(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Clases y funciones existentes (sin cambios)
 DATE_FORMATS = [
     "%Y-%m-%d", "%d/%m/%Y", "%m-%d-%Y", "%d-%m-%Y", "%Y%m%d",
     "%Y/%m/%d", "%b %d, %Y", "%d %b %Y", "%Y-%m-%d %H:%M:%S",
@@ -69,45 +60,28 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
     return None
 
 def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
-    """
-    Detecta dinámicamente el campo de fecha en los registros basándose en los valores.
-
-    Args:
-        records (List[Dict]): Lista de registros obtenidos de la API.
-        fields_info (Dict): Información de campos devuelta por list_fields.
-
-    Returns:
-        Optional[str]: Nombre del campo de fecha detectado o None si no se encuentra.
-    """
     if not records or not fields_info:
         logger.warning("No records or fields_info provided for date detection")
         return None
-
     key_values = fields_info.get("key_values", {})
     if not key_values:
         logger.warning("No categorical fields available in fields_info")
         return None
-
     best_candidate = None
     best_score = 0
-
     for field in key_values.keys():
         sample_values = [r.get(field) for r in records[:50] if field in r]
         if not sample_values:
             continue
-
         valid_dates = [detect_and_normalize_date(str(v)) for v in sample_values]
         valid_count = sum(1 for d in valid_dates if d)
         valid_ratio = valid_count / len(sample_values) if sample_values else 0
-
         score = valid_ratio
         if any(keyword in field.lower() for keyword in ["date", "time", "created", "updated", "timestamp"]):
             score += 0.2
-
         if score > best_score:
             best_score = score
             best_candidate = field
-
     if best_candidate and best_score >= 0.5:
         logger.info(f"Date field detected: {best_candidate} (score: {best_score})")
         return best_candidate
@@ -122,24 +96,19 @@ def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dic
             "covered_dates": [],
             "message": f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
         }
-    
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
     expected_dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((end - start).days + 1)]
-    
     covered_dates = sorted(set(r["date"] for r in data if r.get("date") and r["date"] != "Desconocida"))
-    
     if not covered_dates:
         return {
             "has_data": False,
             "covered_dates": [],
             "message": f"No se encontraron registros con fechas válidas en el rango del {start_date} al {end_date}."
         }
-    
     has_start = start_date in covered_dates
     has_end = end_date in covered_dates
     missing_dates = [d for d in expected_dates if d not in covered_dates]
-    
     if not missing_dates:
         message = "Se encontraron registros para todas las fechas en el rango solicitado."
     elif has_start and not has_end:
@@ -148,7 +117,6 @@ def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dic
         message = f"Solo se encontraron datos para las fechas {', '.join(covered_dates)} dentro del rango solicitado."
     else:
         message = f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
-    
     return {
         "has_data": bool(covered_dates),
         "covered_dates": covered_dates,
@@ -180,7 +148,6 @@ class AuthClient:
     def get(self, endpoint: str, params: Optional[Dict] = None) -> httpx.Response:
         if not self.token:
             self.authenticate()
-        
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
             response = self.client.get(
@@ -230,12 +197,11 @@ class DataValidator:
         return normalized_date
 
     @staticmethod
-    def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict[str, str]) -> Dict:
+    def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict) -> Dict:
         try:
             fields_info = json.loads(list_fields(ctx))
             if fields_info["status"] != "success":
                 raise ValueError("No se pudo validar contra la API")
-
             if "start_date" in key_values or "end_date" in key_values:
                 if "start_date" not in key_values or "end_date" not in key_values:
                     raise ValueError("Se deben proporcionar tanto start_date como end_date")
@@ -245,13 +211,11 @@ class DataValidator:
                     raise ValueError("start_date no puede ser posterior a end_date")
                 key_values["start_date"] = start_date
                 key_values["end_date"] = end_date
-
             errors = []
             invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
             if invalid_figures:
                 valid_figures = fields_info["key_figures"]
                 errors.append(f"Campos numéricos inválidos: {invalid_figures}. Campos disponibles: {', '.join(valid_figures)}.")
-
             invalid_values = {}
             for k, v in key_values.items():
                 if k in ["start_date", "end_date"]:
@@ -263,236 +227,14 @@ class DataValidator:
                     invalid_values[k] = v
                     valid_vals = fields_info["key_values"].get(k, [])
                     errors.append(f"Valor inválido para '{k}': '{v}'. Valores válidos: {', '.join(valid_vals)}.")
-
             if errors:
                 raise ValueError(" | ".join(errors))
-            
             return fields_info
         except Exception as e:
             logger.error(f"Fallo en validación de campos: {str(e)}")
             raise
 
-def clean_ocr_text(content: str) -> str:
-    content = re.sub(r"\$_[0-9a-z]\$", "", content)
-    content = content.replace("$_1$", "").replace("$_c$", "").replace("$_v$", "")
-    content = re.sub(r"\s+", " ", content)
-    content = content.replace("•", "").replace("◦", "")
-    content = re.sub(r"([a-zA-Z])\s+([a-zA-Z])", r"\1\2", content)
-    content = content.replace("ime≤", "time ≤").replace("ount≤", "count ≤")
-    content = content.replace("onsumption", "consumption").replace("ate≥", "rate ≥")
-    content = content.replace(r"$<=$", "<=").replace(r"$>=$", ">=").replace(r"^{\circ}", "°").replace(r"\%", "%")
-    content = re.sub(r"<[ ]*=", "<=", content)
-    content = re.sub(r">+[ ]*=", ">=", content)
-    content = re.sub(r"(\w+)(<=|>=|=|<|>)", r"\1 \2", content)
-    return content.strip()
-
-def detect_operator_between(param_end: int, value_start: int, sentence: str) -> str:
-    text_before = sentence[max(0, param_end - 20):value_start].lower()
-    operator_map = {
-        ">=": [r">=", r"≥", r"greater\s+than\s+or\s+equal", r"at\s+least"],
-        "<=": [r"<=", r"≤", r"less\s+than\s+or\s+equal", r"at\s+most", r"not\s+exceeding"],
-        ">": [r">", r"greater\s+than", r"exceeds"],
-        "<": [r"<", r"less\s+than", r"below", r"must\s+be\s+below"],
-        "==": [r"=", r"==", r"equals", r"equal\s+to"],
-        "!=": [r"!=", r"not\s+equal"]
-    }
-    for op_key, patterns in operator_map.items():
-        for pattern in patterns:
-            if re.search(pattern, text_before):
-                return op_key
-    logger.warning(f"No operator detected in '{text_before}', defaulting to >=")
-    return ">="
-
-def detect_unit_near(value_end: int, param: str, sentence: str) -> str:
-    text_after = sentence[value_end:value_end + 20].lower()
-    unit_patterns = [
-        (r"°[cf]", ["temperature"]),
-        (r"mm/s|in/s|mm/sec", ["vibration"]),
-        (r"%", ["uptime", "humidity"]),
-        (r"bar|psi|hpa", ["pressure"]),
-        (r"/min|/h", ["throughput", "production_rate", "output_rate"]),
-        (r"db|decibel", ["noise_level"]),
-        (r"rpm", ["speed"]),
-        (r"mm|cm|m|in|ft", ["length", "width", "height"]),
-    ]
-    for pattern, params in unit_patterns:
-        if not params or param in params:
-            match = re.search(pattern, text_after)
-            if match:
-                return match.group(0)
-    generic_unit = re.search(r"[a-zA-Z0-9]+(?:/[a-zA-Z0-9]+)?(?:\^[0-9]+)?", text_after)
-    if generic_unit:
-        logger.info(f"Detected generic unit for {param}: {generic_unit.group(0)}")
-        return generic_unit.group(0)
-    return "" if param in ["error_count", "defects", "inventory_level"] else ""
-
-def generate_field_synonyms(valid_fields: List[str]) -> Dict[str, List[str]]:
-    synonyms = {}
-    for field in valid_fields:
-        base_synonyms = [field, field.replace("_", " ")]
-        if field.endswith("s"):
-            base_synonyms.append(field[:-1])
-        elif field in ["uptime", "downtime", "runtime"]:
-            base_synonyms.extend([f"{field[:-4]}{suffix}" for suffix in ["", " percentage", " ratio"]])
-        elif "temperature" in field:
-            base_synonyms.extend(["temp", "thermo", f"{field} level"])
-        elif "vibration" in field:
-            base_synonyms.extend(["vib", "oscillation", f"{field} amplitude"])
-        elif "defects" in field or "error_count" in field:
-            base_synonyms.extend(["defect", "rejections", "faults", "errors", "error"])
-        elif "pressure" in field:
-            base_synonyms.extend(["press", "force"])
-        elif "humidity" in field:
-            base_synonyms.extend(["moisture", "hum"])
-        elif "throughput" in field or "rate" in field:
-            base_synonyms.extend(["output", "production rate", "flow"])
-
-        synonyms[field] = list(set(base_synonyms))
-    return synonyms
-
-def load_sop(machine: str) -> Dict:
-    try:
-        existing = qdrant_client.scroll(
-            collection_name="sop_pdfs",
-            scroll_filter=models.Filter(must=[models.FieldCondition(key="machine", match=models.MatchValue(value=machine))]),
-            limit=1
-        )
-        if existing[0]:
-            logger.info(f"Rules found in Qdrant for {machine}")
-            return existing[0][0].payload.get("rules", {})
-
-        try:
-            response = minio_client.get_object(MINIO_BUCKET, f"{machine}.pdf")
-            pdf_data = response.read()
-            response.close()
-            response.release_conn()
-        except S3Error:
-            logger.warning(f"PDF not found for {machine}")
-            return {}
-
-        with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
-            content = ""
-            for page in pdf.pages:
-                content += (page.extract_text() or "")
-                tables = page.extract_tables()
-                for table in tables:
-                    for row in table:
-                        content += " ".join(str(cell) for cell in row if cell) + "\n"
-
-        content = clean_ocr_text(content)
-        logger.info(f"Extracted text for {machine}: {content[:100]}...")
-
-        fields_info = json.loads(list_fields(Context()))
-        valid_fields = fields_info.get("key_figures", []) if fields_info.get("status") == "success" else []
-        logger.info(f"Valid fields from list_fields: {valid_fields}")
-
-        field_synonyms = generate_field_synonyms(valid_fields)
-        logger.info(f"Generated field_synonyms: {field_synonyms}")
-
-        @Language.component("custom_ner")
-        def custom_ner(doc):
-            new_ents = []
-            for token in doc:
-                for field, synonyms in field_synonyms.items():
-                    if token.text.lower() in [s.lower() for s in synonyms]:
-                        new_ents.append(Span(doc, token.i, token.i + 1, label="PARAM"))
-                        break
-                if re.match(r"\d+\.?\d*(?:[a-zA-Z/°%]+)?", token.text):
-                    new_ents.append(Span(doc, token.i, token.i + 1, label="VALUE"))
-            doc.ents = new_ents
-            return doc
-
-        if "custom_ner" in nlp.pipe_names:
-            nlp.remove_pipe("custom_ner")
-        nlp.add_pipe("custom_ner", last=True)
-
-        rules = {}
-        doc = nlp(content)
-        sentences = list(doc.sents)
-
-        for sent in sentences:
-            entities = [(ent.text, ent.label_, ent.start_char, ent.end_char) for ent in sent.ents]
-            param_ents = [(text, start, end) for text, label, start, end in entities if label == "PARAM"]
-            value_ents = [(text, start, end) for text, label, start, end in entities if label == "VALUE"]
-
-            logger.info(f"Entities in sentence '{sent.text}': PARAM={param_ents}, VALUE={value_ents}")
-
-            for param_text, param_start, param_end in param_ents:
-                param = None
-                for field, synonyms in field_synonyms.items():
-                    if param_text.lower() in [s.lower() for s in synonyms]:
-                        param = field
-                        break
-                if not param:
-                    logger.warning(f"Parameter {param_text} not mapped to valid field")
-                    continue
-
-                closest_value = None
-                min_distance = float('inf')
-                selected_operator = None
-                selected_unit = ""
-
-                for value_text, value_start, value_end in value_ents:
-                    match = re.match(r"(\d+\.?\d*)([a-zA-Z/°%]+)?", value_text)
-                    if not match:
-                        logger.warning(f"Invalid value format: {value_text}")
-                        continue
-                    number = match.group(1)
-                    unit_in_text = match.group(2) or ""
-                    try:
-                        value = float(number)
-                    except ValueError:
-                        logger.warning(f"Invalid numeric value: {number}")
-                        continue
-
-                    distance = value_start - param_end
-                    if distance < 0 or distance > 100:
-                        continue
-
-                    try:
-                        operator = detect_operator_between(param_end, value_start, sent.text)
-                        unit = unit_in_text or detect_unit_near(value_end, param, sent.text)
-                    except Exception as e:
-                        logger.error(f"Error detecting operator/unit for {param_text} and {value_text}: {str(e)}")
-                        continue
-
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_value = value
-                        selected_operator = operator
-                        selected_unit = unit
-
-                if closest_value is not None:
-                    rules[param] = {
-                        "value": closest_value,
-                        "operator": selected_operator,
-                        "unit": selected_unit,
-                        "source_text": sent.text
-                    }
-                    logger.info(f"Rule extracted: {param} {selected_operator} {closest_value}{selected_unit}")
-
-        if rules:
-            embedding = model.encode(content).tolist()
-            qdrant_client.upsert(
-                collection_name="sop_pdfs",
-                points=[models.PointStruct(
-                    id=hashlib.md5(machine.encode()).hexdigest(),
-                    vector=embedding,
-                    payload={
-                        "machine": machine,
-                        "filename": f"{machine}.pdf",
-                        "rules": rules
-                    }
-                )]
-            )
-            logger.info(f"Rules stored in Qdrant for {machine}: {rules}")
-
-        return rules
-
-    except Exception as e:
-        logger.error(f"SOP processing failed for {machine}: {str(e)}")
-        return {}
-
+# Funciones existentes sin cambios
 @mcp.tool()
 def get_pdf_content(ctx: Context, filename: str) -> str:
     try:
@@ -509,16 +251,13 @@ def get_pdf_content(ctx: Context, filename: str) -> str:
                 "filename": filename,
                 "content": ""
             }, ensure_ascii=False)
-
         with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
             content = "\n".join(page.extract_text() or "" for page in pdf.pages)
-
         return json.dumps({
             "status": "success",
             "filename": filename,
             "content": content
         }, ensure_ascii=False)
-
     except Exception as e:
         logger.error(f"Error extracting content from {filename}: {str(e)}")
         return json.dumps({
@@ -537,7 +276,6 @@ def list_fields(ctx: Context) -> str:
         response = auth_client.get("/machines/")
         response.raise_for_status()
         records = response.json()
-
         if not records:
             return json.dumps({
                 "status": "no_data",
@@ -545,25 +283,21 @@ def list_fields(ctx: Context) -> str:
                 "key_figures": [],
                 "key_values": {}
             })
-
         sample = records[0]
         key_figures = []
         key_values = {}
-        
         for field, value in sample.items():
             if isinstance(value, (int, float)):
                 key_figures.append(field)
             elif isinstance(value, str):
                 unique_values = sorted({rec[field] for rec in records if field in rec})
                 key_values[field] = unique_values
-
         logger.info(f"Fields listed: key_figures={key_figures}, key_values={key_values}")
         return json.dumps({
             "status": "success",
             "key_figures": key_figures,
             "key_values": key_values
         }, ensure_ascii=False)
-
     except Exception as e:
         logger.error(f"Field listing failed: {str(e)}")
         return json.dumps({
@@ -585,15 +319,12 @@ def fetch_mes_data(
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
-        
         fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
         valid_figures = fields_info["key_figures"]
         valid_values = fields_info["key_values"]
         logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}")
-
         start_date = key_values.get("start_date")
         end_date = key_values.get("end_date")
-        
         must_conditions = []
         for k, v in key_values.items():
             if k not in ["start_date", "end_date"] and k in valid_values:
@@ -618,7 +349,6 @@ def fetch_mes_data(
                     "data": [],
                     "covered_dates": []
                 }, ensure_ascii=False)
-
         qdrant_results = qdrant_client.scroll(
             collection_name="mes_logs",
             scroll_filter=models.Filter(must=must_conditions) if must_conditions else None,
@@ -626,17 +356,14 @@ def fetch_mes_data(
         )
         processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
         logger.info(f"Fetched {len(processed_data)} records from Qdrant for {key_values}")
-
         params = {}
         if start_date and end_date:
             params.update({"start_date": start_date, "end_date": end_date})
         response = auth_client.get("/machines/", params=params)
         response.raise_for_status()
         all_data = response.json()
-
         date_field = find_date_field(all_data, fields_info)
         logger.info(f"Detected date field: {date_field}")
-
         full_data = []
         for record in all_data:
             item = {}
@@ -645,12 +372,10 @@ def fetch_mes_data(
                 item["date"] = normalized_date or "Desconocida"
             else:
                 item["date"] = "Desconocida"
-            
             for field in valid_figures + list(valid_values.keys()):
                 if field in record:
                     item[field] = record[field]
             full_data.append(item)
-
         if full_data and start_date and end_date:
             try:
                 start = datetime.strptime(start_date, "%Y-%m-%d")
@@ -662,7 +387,6 @@ def fetch_mes_data(
                             record["date"] = (start + timedelta(days=i % delta)).strftime("%Y-%m-%d")
             except ValueError:
                 pass
-
         if full_data:
             points = [
                 models.PointStruct(
@@ -673,7 +397,6 @@ def fetch_mes_data(
             ]
             qdrant_client.upsert(collection_name="mes_logs", points=points)
             logger.info(f"Stored {len(points)} points in Qdrant mes_logs")
-
         if not processed_data:
             data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
             processed_data = [
@@ -681,7 +404,6 @@ def fetch_mes_data(
                 if all(r.get(k) == v for k, v in data_filters.items())
             ]
             logger.info(f"Filtered {len(processed_data)} records in memory for {data_filters}")
-
         if key_figures:
             missing_figures = [k for k in key_figures if not any(k in r for r in processed_data)]
             if missing_figures:
@@ -693,19 +415,16 @@ def fetch_mes_data(
                     "message": f"No data found for fields: {', '.join(missing_figures)}.",
                     "covered_dates": []
                 }, ensure_ascii=False)
-
         response_fields = ["date"] + list(key_values.keys()) + key_figures
         response_data = [
             {k: r[k] for k in response_fields if k in r}
             for r in processed_data
         ]
-
         coverage = check_date_coverage(response_data, start_date, end_date) if start_date and end_date else {
             "has_data": bool(response_data),
             "covered_dates": [],
             "message": "No date range specified" if not response_data else "Data retrieved successfully"
         }
-
         return json.dumps({
             "status": "success" if response_data else "no_data",
             "count": len(response_data),
@@ -713,7 +432,6 @@ def fetch_mes_data(
             "message": coverage["message"],
             "covered_dates": coverage["covered_dates"]
         }, ensure_ascii=False)
-
     except Exception as e:
         logger.error(f"Data retrieval failed: {str(e)}")
         return json.dumps({
@@ -724,6 +442,7 @@ def fetch_mes_data(
             "covered_dates": []
         }, ensure_ascii=False)
 
+# Funciones de reglas personalizadas (sin cambios)
 @mcp.tool()
 def add_custom_rule(
     ctx: Context,
@@ -758,10 +477,8 @@ def add_custom_rule(
                 machines = json.loads(machines)
             except json.JSONDecodeError:
                 machines = [machines.strip()]
-
         if not isinstance(machines, list):
             raise ValueError("machines must be a list of strings")
-
         if isinstance(key_figures, str):
             try:
                 parsed_figures = json.loads(key_figures)
@@ -777,7 +494,6 @@ def add_custom_rule(
                         field, value = pair.split(':', 1)
                     else:
                         raise ValueError(f"Invalid format: {pair}: Use 'key=value' or 'key:value'")
-                    
                     field = field.strip()
                     try:
                         parsed_figures[field] = float(value.strip())
@@ -789,35 +505,27 @@ def add_custom_rule(
             key_figures = parsed_figures
         else:
             raise ValueError("key_figures must be dict or string")
-
         if not machines:
             raise ValueError("At least one machine must be specified")
-
         if not key_figures:
             raise ValueError("At least one metric must be specified")
-
         fields_info = json.loads(list_fields(ctx))
         if fields_info["status"] != "success":
             raise ValueError("Could not validate against API")
-
         valid_machines = fields_info["key_values"].get("machine", [])
         invalid_machines = [m for m in machines if m not in valid_machines]
         if invalid_machines:
             raise ValueError(f"Invalid machines: {invalid_machines}. Valid machines: {valid_machines}")
-
         invalid_metrics = [f for f in key_figures if f not in fields_info["key_figures"]]
         if invalid_metrics:
             raise ValueError(f"Invalid metrics: {invalid_metrics}. Valid metrics: {fields_info['key_figures']}")
-
         valid_operators = [">=", "<=", ">", "<", "==", "!="]
         if operator not in valid_operators:
             raise ValueError(f"Invalid operator. Use one of: {valid_operators}")
-
         if key_values:
             for k, v in key_values.items():
                 if k not in fields_info["key_values"] or v not in fields_info["key_values"].get(k, []):
                     raise ValueError(f"Invalid filter: {k}={v}. Valid values for {k}: {fields_info['key_values'].get(k, [])}")
-
         final_rule = {
             "machines": machines,
             "key_figures": key_figures,
@@ -826,12 +534,10 @@ def add_custom_rule(
             "unit": unit,
             "description": description
         }
-
         embedding_text = description or " ".join(
             [f"{k} {operator} {v}{unit or ''}" for k, v in key_figures.items()]
         )
         embedding = model.encode(embedding_text).tolist()
-
         qdrant_client.upsert(
             collection_name="custom_rules",
             points=[models.PointStruct(
@@ -840,16 +546,13 @@ def add_custom_rule(
                 payload=final_rule
             )]
         )
-
         metrics_desc = ", ".join(
             [f"{k} {operator} {v}{unit or ''}" for k, v in key_figures.items()]
         )
         filters_desc = ", ".join([f"{k}={v}" for k, v in (key_values or {}).items()])
-        
         message = f"Rule added for {len(machines)} machine(s): {metrics_desc}"
         if filters_desc:
             message += f" | Filters: {filters_desc}"
-
         return json.dumps({
             "status": "success",
             "message": message,
@@ -860,7 +563,6 @@ def add_custom_rule(
                 "filters_count": len(key_values or {})
             }
         }, ensure_ascii=False)
-
     except Exception as e:
         logger.error(f"Error adding rule: {str(e)}")
         return json.dumps({
@@ -899,9 +601,7 @@ def list_custom_rules(
                     match=models.MatchAny(any=[machine])
                 )
             )
-
         scroll_filter = models.Filter(must=filter_conditions) if filter_conditions else None
-
         rules = qdrant_client.scroll(
             collection_name="custom_rules",
             scroll_filter=scroll_filter,
@@ -909,7 +609,6 @@ def list_custom_rules(
             with_payload=True,
             with_vectors=False
         )
-
         formatted_rules = []
         for rule in rules[0]:
             formatted_rules.append({
@@ -923,7 +622,6 @@ def list_custom_rules(
                 "applies_to": f"{len(rule.payload.get('machines', []))} machines",
                 "metrics": list(rule.payload.get("key_figures", {}).keys())
             })
-
         return json.dumps({
             "status": "success",
             "count": len(formatted_rules),
@@ -937,7 +635,6 @@ def list_custom_rules(
                 }
             }
         }, ensure_ascii=False)
-
     except Exception as e:
         logger.error(f"Error listing rules: {str(e)}")
         return json.dumps({
@@ -957,24 +654,20 @@ def delete_custom_rule(
             ids=[rule_id],
             with_payload=True
         )
-
         if not existing:
             return json.dumps({
                 "status": "error",
                 "message": f"Rule with ID {rule_id} not found"
             }, ensure_ascii=False)
-
         qdrant_client.delete(
             collection_name="custom_rules",
             points_selector=models.PointIdsList(
                 points=[rule_id]
             )
         )
-
         rule_data = existing[0].payload
         metrics = list(rule_data.get("key_figures", {}).keys())
         machines = rule_data.get("machines", [])
-
         return json.dumps({
             "status": "success",
             "message": f"Rule deleted: {', '.join(metrics)} for {len(machines)} machine(s)",
@@ -986,7 +679,6 @@ def delete_custom_rule(
                 "description": rule_data.get("description", "")
             }
         }, ensure_ascii=False)
-
     except Exception as e:
         logger.error(f"Error deleting rule {rule_id}: {str(e)}")
         return json.dumps({
@@ -995,6 +687,7 @@ def delete_custom_rule(
             "rule_id": rule_id
         }, ensure_ascii=False)
 
+# Función modificada: analyze_compliance
 @mcp.tool()
 def analyze_compliance(
     ctx: Context,
@@ -1058,12 +751,12 @@ def analyze_compliance(
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
-        
         fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
         valid_values = fields_info["key_values"]
         valid_figures = fields_info["key_figures"]
         logger.info(f"Analyzing compliance: key_figures={key_figures}, key_values={key_values}")
 
+        # Identificar el campo y valor para la máquina
         identifier_field = None
         identifier_value = None
         for field in valid_values:
@@ -1075,6 +768,7 @@ def analyze_compliance(
             identifier_field = next(iter(valid_values))
             identifier_value = key_values.get(identifier_field)
 
+        # Obtener datos MES
         fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures))
         analysis_notes = [fetch_result.get("message", "")] if fetch_result.get("message") else []
 
@@ -1086,7 +780,7 @@ def analyze_compliance(
                 "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
                 "metrics_analyzed": key_figures,
                 "results": [],
-                "sop_coverage": "0/0 entities with SOP",
+                "sop_content": {},
                 "custom_rules_applied": 0,
                 "analysis_notes": analysis_notes
             }, ensure_ascii=False)
@@ -1099,17 +793,29 @@ def analyze_compliance(
                 "analysis_notes": analysis_notes
             }, ensure_ascii=False)
 
+        # Identificar el campo de fecha
         date_field = find_date_field(fetch_result["data"], fields_info)
         logger.info(f"Date field for compliance analysis: {date_field}")
         if not date_field:
             analysis_notes.append("No date field detected; date filters ignored.")
 
+        # Obtener contenido de PDFs para cada máquina
         identifiers = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
-        machine_rules = {}
+        sop_content = {}
         for identifier in identifiers:
-            machine_rules[identifier] = load_sop(identifier) if identifier_field == "machine" else {}
-            logger.info(f"SOP rules for {identifier_field}={identifier}: {machine_rules[identifier]}")
+            if identifier_field == "machine":
+                pdf_result = json.loads(get_pdf_content(ctx, f"{identifier}.pdf"))
+                if pdf_result["status"] == "success":
+                    sop_content[identifier] = pdf_result["content"]
+                else:
+                    sop_content[identifier] = ""
+                    analysis_notes.append(f"Failed to load SOP for {identifier}: {pdf_result['message']}")
+                logger.info(f"SOP content for {identifier_field}={identifier}: {sop_content[identifier][:100]}...")
+            else:
+                sop_content[identifier] = ""
+                analysis_notes.append(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
 
+        # Obtener reglas personalizadas
         custom_rules = []
         if identifiers and identifier_field == "machine":
             custom_result = qdrant_client.scroll(
@@ -1122,6 +828,7 @@ def analyze_compliance(
             custom_rules = [r.payload for r in custom_result[0]] if custom_result and custom_result[0] else []
             logger.info(f"Custom rules: {len(custom_rules)}")
 
+        # Preparar resultados para el LLM
         results = []
         for record in fetch_result["data"]:
             analysis = {
@@ -1130,124 +837,9 @@ def analyze_compliance(
             for k in key_values:
                 if k not in ["start_date", "end_date"] and k in record:
                     analysis[k] = record[k]
-            
             analysis.update({
-                "metrics": {k: record[k] for k in key_figures if k in record},
-                "compliance": {},
-                "compliance_percentage": 0.0
+                "metrics": {k: record[k] for k in key_figures if k in record}
             })
-            
-            compliant = 0
-            total = 0
-            
-            for field in key_figures:
-                if field not in record:
-                    logger.warning(f"Field {field} not in record: {record}")
-                    analysis_notes.append(f"Field '{field}' missing in record for date {record.get('date', 'Desconocida')}.")
-                    continue
-                    
-                total += 1
-                compliance_info = {}
-                
-                identifier = record.get(identifier_field) if identifier_field else None
-                sop_rules = machine_rules.get(identifier, {}) if identifier else {}
-                if field in sop_rules:
-                    rule = sop_rules[field]
-                    value = record[field]
-                    op = rule["operator"]
-                    is_compliant = False
-                    try:
-                        if op == ">=":
-                            is_compliant = value >= rule['value']
-                        elif op == "<=":
-                            is_compliant = value <= rule['value']
-                        elif op == ">":
-                            is_compliant = value > rule['value']
-                        elif op == "<":
-                            is_compliant = value < rule['value']
-                        elif op == "==":
-                            is_compliant = value == rule['value']
-                        elif op == "!=":
-                            is_compliant = value != rule['value']
-                        compliance_info["sop"] = {
-                            "value": value,
-                            "rule": f"{op} {rule['value']}{rule.get('unit', '')}",
-                            "status": "is_compliant" if is_compliant else "non_compliant"
-                        }
-                        compliant += 1 if is_compliant else 0
-                        logger.info(f"SOP compliance for {field}: {compliance_info['sop']}")
-                    except TypeError:
-                        compliance_info["sop"] = {
-                            "value": value,
-                            "rule": "invalid_comparison",
-                            "status": "unknown"
-                        }
-                        analysis_notes.append(f"Invalid comparison for {field} in SOP rule.")
-                else:
-                    compliance_info["sop"] = {
-                        "value": record[field],
-                        "rule": "no_rule_defined",
-                        "status": "unknown"
-                    }
-                
-                compliance_info["custom"] = []
-                for rule in custom_rules:
-                    if field not in rule["key_figures"]:
-                        continue
-                    if identifier_field and record.get(identifier_field) not in rule["machines"]:
-                        continue
-                    if rule["key_values"]:
-                        if not all(record.get(k) == v for k, v in rule["key_values"].items()):
-                            continue
-                    rule_value = rule["key_figures"][field]
-                    op = rule["operator"]
-                    value = record[field]
-                    is_compliant = False
-                    try:
-                        if op == ">=":
-                            is_compliant = value >= rule_value
-                        elif op == "<=":
-                            is_compliant = value <= rule_value
-                        elif op == ">":
-                            is_compliant = value > rule_value
-                        elif op == "<":
-                            is_compliant = value < rule_value
-                        elif op == "==":
-                            is_compliant = value == rule_value
-                        elif op == "!=":
-                            is_compliant = value != rule_value
-                        compliance_info["custom"].append({
-                            "value": value,
-                            "rule": f"{op} {rule_value}{rule.get('unit', '')}",
-                            "status": "is_compliant" if is_compliant else "non_compliant",
-                            "description": rule.get("description", ""),
-                            "filters": rule["key_values"]
-                        })
-                        logger.info(f"Custom compliance for {field}: {compliance_info['custom'][-1]}")
-                    except TypeError:
-                        compliance_info["custom"].append({
-                            "value": value,
-                            "rule": "invalid_comparison",
-                            "status": "unknown",
-                            "description": rule.get("description", ""),
-                            "filters": rule["key_values"]
-                        })
-                        analysis_notes.append(f"Invalid comparison for {field} in custom rule.")
-                
-                if not compliance_info["custom"]:
-                    compliance_info["custom"].append({
-                        "value": record[field],
-                        "rule": "no_rule_defined",
-                        "status": "unknown",
-                        "description": "",
-                        "filters": {}
-                    })
-                
-                analysis["compliance"][field] = compliance_info
-            
-            if total > 0:
-                analysis["compliance_percentage"] = round((compliant / total) * 100, 2)
-            
             results.append(analysis)
 
         period = "all dates"
@@ -1260,8 +852,8 @@ def analyze_compliance(
             "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
             "metrics_analyzed": key_figures,
             "results": results,
-            "sop_coverage": f"{sum(1 for r in machine_rules.values() if r)}/{len(identifiers or [1])} entities with SOP",
-            "custom_rules_applied": len(custom_rules),
+            "sop_content": sop_content,
+            "custom_rules": custom_rules,
             "analysis_notes": analysis_notes
         }, ensure_ascii=False)
 
