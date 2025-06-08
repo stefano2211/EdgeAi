@@ -8,6 +8,7 @@ import uuid
 from typing import Optional, List
 import os
 import logging
+import bcrypt
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
@@ -20,8 +21,12 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")  # Cambia en producc
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_MINUTES = 60  # Tokens expiran en 60 minutos
 
-# Modelo para login
+# Modelos
 class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class RegisterRequest(BaseModel):
     username: str
     password: str
 
@@ -70,8 +75,6 @@ def init_db():
                 password TEXT NOT NULL
             )
         """)
-        cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES (?, ?)", 
-                       ("admin", "password123"))  # Cambia en producción
         
         # Insertar registros fijos para máquinas
         cursor.execute("SELECT COUNT(*) FROM machines")
@@ -115,17 +118,7 @@ async def startup_event():
 
 # Generar token JWT
 def create_jwt_token(username: str) -> str:
-    """Genera un token JWT para un usuario dado.
-
-    Args:
-        username (str): Nombre de usuario para incluir en el token.
-
-    Returns:
-        str: Token JWT generado.
-
-    Raises:
-        Exception: Si falla la generación del token o el almacenamiento en la base de datos.
-    """
+    """Genera un token JWT para un usuario dado."""
     try:
         expire = datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
         to_encode = {"sub": username, "exp": expire, "jti": str(uuid.uuid4())}
@@ -146,38 +139,53 @@ def create_jwt_token(username: str) -> str:
 
 # Validar token
 async def validate_token(credentials: HTTPAuthorizationCredentials = Security(security)):
-    """Valida un token JWT proporcionado en el encabezado de autorización.
-
-    Args:
-        credentials (HTTPAuthorizationCredentials): Credenciales extraídas del encabezado.
-
-    Returns:
-        str: Nombre de usuario asociado al token.
-
-    Raises:
-        HTTPException: Si el token es inválido, expirado o no existe.
-    """
+    """Valida un token JWT proporcionado en el encabezado de autorización."""
     try:
         token = credentials.credentials
-        conn = sqlite3.connect('database.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT username, expiry FROM sessions WHERE token = ?", (token,))
-        session = cursor.fetchone()
-        
-        if not session:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        
-        username, expiry = session
-        if datetime.fromisoformat(expiry) < datetime.utcnow():
+        # Validar solo con JWT, sin consultar la base de datos
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token: No username")
+        if datetime.fromtimestamp(payload.get("exp")) < datetime.utcnow():
             raise HTTPException(status_code=401, detail="Token expired")
-        
-        # Verificar JWT
-        jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return username
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.PyJWTError as e:
+        logger.error(f"JWT validation failed: {str(e)}")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
     except Exception as e:
         logger.error(f"Token validation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Endpoint de registro
+@app.post("/register")
+async def register(request: RegisterRequest):
+    """Registra un nuevo usuario en la base de datos."""
+    try:
+        conn = sqlite3.connect('database.db')
+        cursor = conn.cursor()
+        
+        # Verificar si el usuario ya existe
+        cursor.execute("SELECT username FROM users WHERE username = ?", (request.username,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        # Hashear la contraseña
+        hashed_password = bcrypt.hashpw(request.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # Insertar nuevo usuario
+        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)",
+                       (request.username, hashed_password))
+        conn.commit()
+        
+        # Generar token para el nuevo usuario
+        token = create_jwt_token(request.username)
+        
+        return {"access_token": token, "token_type": "bearer", "message": "User registered successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Registration failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
@@ -185,24 +193,14 @@ async def validate_token(credentials: HTTPAuthorizationCredentials = Security(se
 # Endpoint de login
 @app.post("/login")
 async def login(request: LoginRequest):
-    """Autentica a un usuario y genera un token JWT.
-
-    Args:
-        request (LoginRequest): Objeto con username y password.
-
-    Returns:
-        dict: Diccionario con el token de acceso y el tipo de token.
-
-    Raises:
-        HTTPException: Si las credenciales son inválidas (401).
-    """
+    """Autentica a un usuario y genera un token JWT."""
     try:
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
         cursor.execute("SELECT password FROM users WHERE username = ?", (request.username,))
         user = cursor.fetchone()
         
-        if not user or user[0] != request.password:
+        if not user or not bcrypt.checkpw(request.password.encode('utf-8'), user[0].encode('utf-8')):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
         token = create_jwt_token(request.username)
@@ -223,20 +221,7 @@ async def get_all_machines(
     specific_date: Optional[str] = None,
     username: str = Depends(validate_token)
 ):
-    """Obtiene todos los registros de máquinas, opcionalmente filtrados por fechas.
-
-    Args:
-        start_date (Optional[str]): Fecha de inicio (YYYY-MM-DD).
-        end_date (Optional[str]): Fecha de fin (YYYY-MM-DD).
-        specific_date (Optional[str]): Fecha específica (YYYY-MM-DD).
-        username (str): Nombre de usuario autenticado.
-
-    Returns:
-        List[dict]: Lista de registros de máquinas.
-
-    Raises:
-        HTTPException: Si ocurre un error en la consulta (500).
-    """
+    """Obtiene todos los registros de máquinas, opcionalmente filtrados por fechas."""
     try:
         conn = sqlite3.connect("database.db")
         cursor = conn.cursor()
@@ -302,21 +287,7 @@ async def get_machine_records(
     specific_date: Optional[str] = None,
     username: str = Depends(validate_token)
 ):
-    """Obtiene registros para una máquina específica, opcionalmente filtrados por fechas.
-
-    Args:
-        machine (str): Nombre de la máquina.
-        start_date (Optional[str]): Fecha de inicio (YYYY-MM-DD).
-        end_date (Optional[str]): Fecha de fin (YYYY-MM-DD).
-        specific_date (Optional[str]): Fecha específica (YYYY-MM-DD).
-        username (str): Nombre de usuario autenticado.
-
-    Returns:
-        List[dict]: Lista de registros de la máquina.
-
-    Raises:
-        HTTPException: Si la máquina no se encuentra (404) o si ocurre un error (500).
-    """
+    """Obtiene registros para una máquina específica, opcionalmente filtrados por fechas."""
     try:
         conn = sqlite3.connect("database.db")
         cursor = conn.cursor()

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Configuración del MCP
 mcp = FastMCP("Manufacturing Compliance Processor")
 API_URL = os.getenv("API_URL", "http://api:5000")
+TOKEN_API_URL = os.getenv("TOKEN_API_URL", "http://token-api:5001")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
@@ -55,7 +56,6 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
     """
     if not isinstance(date_str, str) or not date_str.strip():
         return None
-    # Filtrar valores claramente no relacionados con fechas
     if any(keyword in date_str.lower() for keyword in ["model", "line", "batch", "aluminum", "steel", "plastic", "copper", "brass", "titanium", "chip", "crack", "dent", "scratch", "warp", "none"]):
         return None
     for fmt in DATE_FORMATS:
@@ -73,18 +73,15 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
 def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
     """
     Detecta el campo que contiene fechas en los registros.
-    Usa el campo cacheado si está disponible y el esquema no ha cambiado.
     """
     global DATE_FIELD_CACHE
     if not records or not fields_info:
         logger.warning("No records or fields_info provided for date detection")
         return None
 
-    # Generar hash del esquema
     schema = json.dumps(fields_info, sort_keys=True)
     schema_hash = hashlib.md5(schema.encode()).hexdigest()
 
-    # Usar caché si es válido
     if DATE_FIELD_CACHE["field"] and DATE_FIELD_CACHE["schema_hash"] == schema_hash:
         logger.info(f"Using cached date field: {DATE_FIELD_CACHE['field']}")
         return DATE_FIELD_CACHE["field"]
@@ -96,9 +93,7 @@ def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
 
     best_candidate = None
     best_score = 0
-    # Limitar a 10 registros
     for field in key_values.keys():
-        # Excluir campos no relacionados con fechas
         if any(keyword in field.lower() for keyword in ["machine", "production_line", "material", "batch_id", "defect_type"]):
             continue
         sample_values = [r.get(field) for r in records[:10] if field in r]
@@ -162,74 +157,73 @@ def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dic
 
 class AuthClient:
     """
-    Cliente para autenticación con la API.
+    Cliente para autenticación con la API principal y la API de tokens.
     """
-    def __init__(self, base_url: str, username: str, password: str):
-        self.base_url = base_url
-        self.username = username
-        self.password = password
+    def __init__(self, api_url: str, token_api_url: str):
+        self.api_url = api_url
+        self.token_api_url = token_api_url
         self.client = httpx.Client()
         self.token = None
 
-    def authenticate(self):
+    def fetch_token(self):
+        """Obtiene un token JWT de la API de tokens."""
         try:
-            response = self.client.post(
-                f"{self.base_url}/login",
-                json={"username": self.username, "password": self.password}
-            )
+            response = self.client.get(f"{self.token_api_url}/get-token")
             response.raise_for_status()
             data = response.json()
             self.token = data["access_token"]
-            logger.info("Autenticación exitosa, token obtenido")
+            logger.info("Token fetched from token-api")
         except Exception as e:
-            logger.error(f"Fallo en autenticación: {str(e)}")
-            raise ValueError(f"No se pudo autenticar: {str(e)}")
+            logger.error(f"Failed to fetch token from token-api: {str(e)}")
+            raise ValueError(f"No se pudo obtener token: {str(e)}")
 
     def get(self, endpoint: str, params: Optional[Dict] = None) -> httpx.Response:
+        """Realiza una solicitud GET a la API principal, obteniendo un token si es necesario."""
         if not self.token:
-            self.authenticate()
+            self.fetch_token()
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
             response = self.client.get(
-                f"{self.base_url}{endpoint}",
+                f"{self.api_url}{endpoint}",
                 headers=headers,
                 params=params
             )
             if response.status_code == 401:
-                logger.info("Token inválido, reautenticando...")
-                self.authenticate()
+                logger.info("Token inválido, obteniendo nuevo token...")
+                self.fetch_token()
                 headers = {"Authorization": f"Bearer {self.token}"}
                 response = self.client.get(
-                    f"{self.base_url}{endpoint}",
+                    f"{self.api_url}{endpoint}",
                     headers=headers,
                     params=params
                 )
-            logger.info(f"HTTP Request: GET {self.base_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
+            logger.info(f"HTTP Request: GET {self.api_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
             return response
         except Exception as e:
             logger.error(f"Error en solicitud GET: {str(e)}")
             raise
 
     def post(self, endpoint: str, json_data: Optional[Dict] = None) -> httpx.Response:
+        """Realiza una solicitud POST a la API principal, obteniendo un token si es necesario."""
         if not self.token:
-            self.authenticate()
+            self.fetch_token()
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
             response = self.client.post(
-                f"{self.base_url}{endpoint}",
+                f"{self.api_url}{endpoint}",
                 headers=headers,
                 json=json_data
             )
             if response.status_code == 401:
-                logger.info("Token inválido, reautenticando...")
-                self.authenticate()
+                logger.info("Token inválido, obteniendo nuevo token...")
+                self.fetch_token()
                 headers = {"Authorization": f"Bearer {self.token}"}
                 response = self.client.post(
-                    f"{self.base_url}{endpoint}",
+                    f"{self.api_url}{endpoint}",
                     headers=headers,
                     json=json_data
                 )
-            logger.info(f"HTTP Request: POST {self.base_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
+            logger.info(f"HTTP Request: POST {self.api_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
             return response
         except Exception as e:
             logger.error(f"Error en solicitud POST: {str(e)}")
@@ -252,7 +246,7 @@ def init_infrastructure():
         qdrant_client.recreate_collection(collection_name="custom_rules", vectors_config=vector_config)
         if not minio_client.bucket_exists(MINIO_BUCKET):
             minio_client.make_bucket(MINIO_BUCKET)
-        auth_client = AuthClient(API_URL, API_USERNAME, API_PASSWORD)
+        auth_client = AuthClient(API_URL, TOKEN_API_URL)
     except Exception as e:
         logger.error(f"Infrastructure initialization failed: {str(e)}")
         raise
@@ -806,14 +800,6 @@ def analyze_compliance(
             },
             "key_figures": ["temperature", "uptime", "vibration"]
         }
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores para filtrar.
-        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar.
-
-    Returns:
-        str: JSON con el análisis de cumplimiento.
     """
     try:
         key_values = key_values or {}
@@ -823,7 +809,6 @@ def analyze_compliance(
         valid_figures = fields_info["key_figures"]
         logger.info(f"Analyzing compliance: key_figures={key_figures}, key_values={key_values}")
 
-        # Identificar el campo y valor para la máquina
         identifier_field = None
         identifier_value = None
         for field in valid_values:
@@ -835,7 +820,6 @@ def analyze_compliance(
             identifier_field = next(iter(valid_values))
             identifier_value = key_values.get(identifier_field)
 
-        # Obtener datos MES
         fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures))
         analysis_notes = [fetch_result.get("message", "")] if fetch_result.get("message") else []
 
@@ -862,13 +846,11 @@ def analyze_compliance(
                 "analysis_notes": analysis_notes
             }, ensure_ascii=False)
 
-        # Identificar el campo de fecha
         date_field = find_date_field(fetch_result["data"], fields_info)
         logger.info(f"Date field for compliance analysis: {date_field}")
         if not date_field:
             analysis_notes.append("No date field detected; date filters ignored.")
 
-        # Obtener contenido de PDFs para cada máquina
         identifiers = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
         sop_content = {}
         for identifier in identifiers:
@@ -886,7 +868,6 @@ def analyze_compliance(
                 analysis_notes.append(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
                 logger.info(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
 
-        # Obtener reglas personalizadas
         custom_rules = []
         if identifiers and identifier_field == "machine":
             custom_result = qdrant_client.scroll(
@@ -899,7 +880,6 @@ def analyze_compliance(
             custom_rules = [r.payload for r in custom_result[0]] if custom_result and custom_result[0] else []
             logger.info(f"Custom rules: {len(custom_rules)}")
 
-        # Preparar resultados para el LLM
         results = []
         for record in fetch_result["data"]:
             analysis = {

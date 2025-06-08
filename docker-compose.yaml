@@ -13,6 +13,20 @@ services:
     networks:
       - mes-network
 
+  token-api:
+    build:
+      context: ./token_api
+      dockerfile: Dockerfile.token
+    container_name: token-api
+    ports:
+      - "5001:5001"
+    environment:
+      - JWT_SECRET_KEY=your-secret-key
+    volumes:
+      - token_db_data:/app
+    networks:
+      - mes-network
+
   mcp:
     build:
       context: ./mcp
@@ -30,6 +44,8 @@ services:
       - API_PASSWORD=password123
     depends_on:
       api:
+        condition: service_started
+      token-api:
         condition: service_started
       qdrant:
         condition: service_started
@@ -104,6 +120,7 @@ networks:
 
 volumes:
   db_data:
+  token_db_data:
   qdrant_data:
   openwebui_data:
   ollama_data:
