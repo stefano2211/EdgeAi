@@ -266,20 +266,18 @@ class DataValidator:
         return normalized_date
 
     @staticmethod
-    def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict) -> Dict:
+    def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict:
         try:
             fields_info = json.loads(list_fields(ctx))
             if fields_info["status"] != "success":
                 raise ValueError("No se pudo validar contra la API")
-            if "start_date" in key_values or "end_date" in key_values:
-                if "start_date" not in key_values or "end_date" not in key_values:
-                    raise ValueError("Se deben proporcionar tanto start_date como end_date")
-                start_date = DataValidator.validate_date(key_values["start_date"], "start_date")
-                end_date = DataValidator.validate_date(key_values["end_date"], "end_date")
+            if (start_date and not end_date) or (end_date and not start_date):
+                raise ValueError("Se deben proporcionar tanto start_date como end_date")
+            if start_date and end_date:
+                start_date = DataValidator.validate_date(start_date, "start_date")
+                end_date = DataValidator.validate_date(end_date, "end_date")
                 if start_date > end_date:
                     raise ValueError("start_date no puede ser posterior a end_date")
-                key_values["start_date"] = start_date
-                key_values["end_date"] = end_date
             errors = []
             invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
             if invalid_figures:
@@ -287,8 +285,6 @@ class DataValidator:
                 errors.append(f"Campos numéricos inválidos: {invalid_figures}. Campos disponibles: {', '.join(valid_figures)}.")
             invalid_values = {}
             for k, v in key_values.items():
-                if k in ["start_date", "end_date"]:
-                    continue
                 if k not in fields_info["key_values"]:
                     invalid_values[k] = v
                     errors.append(f"Campo categórico inválido: '{k}'. Campos disponibles: {', '.join(fields_info['key_values'].keys())}.")
@@ -384,7 +380,9 @@ def list_fields(ctx: Context) -> str:
 def fetch_mes_data(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
-    key_figures: Optional[List[str]] = None
+    key_figures: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
 ) -> str:
     """
     Recupera datos MES de la API y Qdrant.
@@ -392,15 +390,13 @@ def fetch_mes_data(
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
-        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
+        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date)
         valid_figures = fields_info["key_figures"]
         valid_values = fields_info["key_values"]
-        logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}")
-        start_date = key_values.get("start_date")
-        end_date = key_values.get("end_date")
+        logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}, start_date={start_date}, end_date={end_date}")
         must_conditions = []
         for k, v in key_values.items():
-            if k not in ["start_date", "end_date"] and k in valid_values:
+            if k in valid_values:
                 must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
         if start_date and end_date:
             try:
@@ -471,7 +467,7 @@ def fetch_mes_data(
             qdrant_client.upsert(collection_name="mes_logs", points=points)
             logger.info(f"Stored {len(points)} points in Qdrant mes_logs")
         if not processed_data:
-            data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
+            data_filters = {k: v for k, v in key_values.items()}
             processed_data = [
                 r for r in full_data
                 if all(r.get(k) == v for k, v in data_filters.items())
@@ -758,7 +754,9 @@ def delete_custom_rule(
 def analyze_compliance(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
-    key_figures: Optional[List[str]] = None
+    key_figures: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
 ) -> str:
     """
     Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
@@ -772,14 +770,14 @@ def analyze_compliance(
         {
             "key_values": {
                 "<campo_categórico_1>": "<valor>",
-                "<campo_categórico_2>": "<valor>",
-                "start_date": "2025-04-09",
-                "end_date": "2025-04-11"
+                "<campo_categórico_2>": "<valor>"
             },
             "key_figures": [
                 "<campo_numérico_1>",
                 "<campo_numérico_2>"
-            ]
+            ],
+            "start_date": "2025-04-09",
+            "end_date": "2025-04-11"
         }
 
     5. Ejemplo dinámico (los campos deben ser seleccionados de la respuesta de `list_fields`):
@@ -797,25 +795,25 @@ def analyze_compliance(
         {
             "key_values": {
                 "machine": "ModelA",
-                "production_line": "Line3",
-                "start_date": "2025-04-09",
-                "end_date": "2025-04-11"
+                "production_line": "Line3"
             },
-            "key_figures": ["temperature", "uptime", "vibration"]
+            "key_figures": ["temperature", "uptime", "vibration"],
+            "start_date": "2025-04-09",
+            "end_date": "2025-04-11"
         }
     """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
-        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
+        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date)
         valid_values = fields_info["key_values"]
         valid_figures = fields_info["key_figures"]
-        logger.info(f"Analyzing compliance: key_figures={key_figures}, key_values={key_values}")
+        logger.info(f"Analyzing compliance: key_figures={key_figures}, key_values={key_values}, start_date={start_date}, end_date={end_date}")
 
         identifier_field = None
         identifier_value = None
         for field in valid_values:
-            if field not in ["start_date", "end_date"] and field in key_values:
+            if field in key_values:
                 identifier_field = field
                 identifier_value = key_values[field]
                 break
@@ -823,7 +821,7 @@ def analyze_compliance(
             identifier_field = next(iter(valid_values))
             identifier_value = key_values.get(identifier_field)
 
-        fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures))
+        fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures, start_date, end_date))
         analysis_notes = [fetch_result.get("message", "")] if fetch_result.get("message") else []
 
         if fetch_result["status"] == "no_data":
@@ -831,7 +829,7 @@ def analyze_compliance(
             return json.dumps({
                 "status": "no_data",
                 "message": fetch_result["message"],
-                "period": f"{key_values.get('start_date', 'N/A')} to {key_values.get('end_date', 'N/A')}",
+                "period": f"{start_date or 'N/A'} to {end_date or 'N/A'}",
                 "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
                 "metrics_analyzed": key_figures,
                 "results": [],
@@ -889,7 +887,7 @@ def analyze_compliance(
                 "date": record.get("date", "Desconocida")
             }
             for k in key_values:
-                if k not in ["start_date", "end_date"] and k in record:
+                if k in record:
                     analysis[k] = record[k]
             analysis.update({
                 "metrics": {k: record[k] for k in key_figures if k in record}
@@ -897,8 +895,8 @@ def analyze_compliance(
             results.append(analysis)
 
         period = "all dates"
-        if "start_date" in key_values and "end_date" in key_values:
-            period = f"{key_values['start_date']} to {key_values['end_date']}"
+        if start_date and end_date:
+            period = f"{start_date} to {end_date}"
 
         return json.dumps({
             "status": "success",
