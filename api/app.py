@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 import jwt
 import uuid
 from typing import Optional, List
@@ -19,7 +19,6 @@ app = FastAPI()
 # Configuración
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")  # Cambia en producción
 ALGORITHM = "HS256"
-TOKEN_EXPIRE_MINUTES = 60  # Tokens expiran en 60 minutos
 
 # Modelos
 class LoginRequest(BaseModel):
@@ -59,12 +58,12 @@ def init_db():
             )
         """)
         
-        # Tabla para tokens de sesión
+        # Tabla para tokens de sesión (expiry ahora es opcional)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
-                expiry DATETIME NOT NULL
+                expiry DATETIME
             )
         """)
         
@@ -118,17 +117,16 @@ async def startup_event():
 
 # Generar token JWT
 def create_jwt_token(username: str) -> str:
-    """Genera un token JWT para un usuario dado."""
+    """Genera un token JWT para un usuario dado sin tiempo de expiración."""
     try:
-        expire = datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
-        to_encode = {"sub": username, "exp": expire, "jti": str(uuid.uuid4())}
+        to_encode = {"sub": username, "jti": str(uuid.uuid4())}
         token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
         
-        # Almacenar token en la base de datos
+        # Almacenar token en la base de datos con expiry NULL
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
         cursor.execute("INSERT INTO sessions (token, username, expiry) VALUES (?, ?, ?)",
-                       (token, username, expire.isoformat()))
+                       (token, username, None))
         conn.commit()
         return token
     except Exception as e:
@@ -142,17 +140,15 @@ async def validate_token(credentials: HTTPAuthorizationCredentials = Security(se
     """Valida un token JWT proporcionado en el encabezado de autorización."""
     try:
         token = credentials.credentials
-        # Validar solo con JWT, sin consultar la base de datos
+        # Validar solo con JWT, sin verificar expiración
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         if not username:
             raise HTTPException(status_code=401, detail="Invalid token: No username")
-        if datetime.fromtimestamp(payload.get("exp")) < datetime.utcnow():
-            raise HTTPException(status_code=401, detail="Token expired")
         return username
     except jwt.PyJWTError as e:
         logger.error(f"JWT validation failed: {str(e)}")
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid or malformed token")
     except Exception as e:
         logger.error(f"Token validation failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")

@@ -1,11 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 import jwt
 import os
 import logging
-import uuid
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
@@ -17,8 +16,6 @@ app = FastAPI()
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")  # Debe coincidir con la API principal
 ALGORITHM = "HS256"
 TOKEN_DB = "token_database.db"
-TOKEN_EXPIRE_MINUTES = 60  # Tokens expiran en 60 minutos
-DEFAULT_USER = "mcp_user"
 
 # Modelo
 class TokenRequest(BaseModel):
@@ -69,12 +66,10 @@ async def store_token(request: TokenRequest):
         conn = sqlite3.connect(TOKEN_DB)
         cursor = conn.cursor()
         
-        # Verificar si el token ya está almacenado
-        cursor.execute("SELECT token FROM tokens WHERE token = ?", (request.token,))
-        if cursor.fetchone():
-            raise HTTPException(status_code=400, detail="Token already stored")
+        # Eliminar cualquier token existente para mantener solo uno
+        cursor.execute("DELETE FROM tokens")
         
-        # Almacenar el token
+        # Almacenar el nuevo token
         cursor.execute("INSERT INTO tokens (token, username, stored_at) VALUES (?, ?, ?)",
                        (request.token, username, datetime.utcnow().isoformat()))
         conn.commit()
@@ -111,8 +106,6 @@ async def validate_token(request: TokenRequest):
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             if payload.get("sub") != username:
                 raise HTTPException(status_code=401, detail="Token username mismatch")
-            if datetime.fromtimestamp(payload.get("exp")) < datetime.utcnow():
-                raise HTTPException(status_code=401, detail="Token expired")
         except jwt.PyJWTError:
             raise HTTPException(status_code=401, detail="Invalid token")
         
@@ -128,28 +121,27 @@ async def validate_token(request: TokenRequest):
 # Endpoint para obtener un token
 @app.get("/get-token")
 async def get_token():
-    """Genera un token JWT para el usuario predeterminado."""
+    """Devuelve el token almacenado en la base de datos."""
     try:
-        expire = datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
-        to_encode = {
-            "sub": DEFAULT_USER,
-            "exp": expire,
-            "jti": str(uuid.uuid4())
-        }
-        token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-        
-        # Almacenar token en la base de datos
         conn = sqlite3.connect(TOKEN_DB)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO tokens (token, username, stored_at) VALUES (?, ?, ?)",
-                       (token, DEFAULT_USER, datetime.utcnow().isoformat()))
-        conn.commit()
         
-        logger.info("Token generated and stored successfully")
+        # Buscar el token almacenado
+        cursor.execute("SELECT token FROM tokens LIMIT 1")
+        result = cursor.fetchone()
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="No token stored")
+        
+        token = result[0]
+        
+        logger.info("Token retrieved successfully")
         return {"access_token": token, "token_type": "bearer"}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to generate token: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to generate token")
+        logger.error(f"Failed to retrieve token: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 

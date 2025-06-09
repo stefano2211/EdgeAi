@@ -27,8 +27,6 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "sop-pdfs")
-API_USERNAME = "admin"
-API_PASSWORD = "password123"
 
 # Inicialización de clientes
 model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -173,9 +171,12 @@ class AuthClient:
             data = response.json()
             self.token = data["access_token"]
             logger.info("Token fetched from token-api")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to fetch token from token-api: {e.response.status_code} {e.response.text}")
+            raise ValueError(f"No se pudo obtener token: {e.response.text}")
         except Exception as e:
-            logger.error(f"Failed to fetch token from token-api: {str(e)}")
-            raise ValueError(f"No se pudo obtener token: {str(e)}")
+            logger.error(f"Unexpected error fetching token: {str(e)}")
+            raise ValueError(f"Error al obtener token: {str(e)}")
 
     def get(self, endpoint: str, params: Optional[Dict] = None) -> httpx.Response:
         """Realiza una solicitud GET a la API principal, obteniendo un token si es necesario."""
@@ -190,6 +191,7 @@ class AuthClient:
             )
             if response.status_code == 401:
                 logger.info("Token inválido, obteniendo nuevo token...")
+                self.token = None
                 self.fetch_token()
                 headers = {"Authorization": f"Bearer {self.token}"}
                 response = self.client.get(
@@ -216,6 +218,7 @@ class AuthClient:
             )
             if response.status_code == 401:
                 logger.info("Token inválido, obteniendo nuevo token...")
+                self.token = None
                 self.fetch_token()
                 headers = {"Authorization": f"Bearer {self.token}"}
                 response = self.client.post(
