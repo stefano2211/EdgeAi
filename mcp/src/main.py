@@ -276,6 +276,7 @@ class DataValidator:
         try:
             fields_info = json.loads(list_fields(ctx))
             if fields_info["status"] != "success":
+                logger.error("Failed to validate fields against API")
                 raise ValueError("No se pudo validar contra la API")
             if (start_date and not end_date) or (end_date and not start_date):
                 raise ValueError("Se deben proporcionar tanto start_date como end_date")
@@ -833,16 +834,21 @@ def analyze_compliance(
         valid_figures = fields_info["key_figures"]
         logger.info(f"Analyzing compliance: key_figures={key_figures}, key_values={key_values}, start_date={start_date}, end_date={end_date}")
 
+        # Selección dinámica de identifier_field
         identifier_field = None
         identifier_value = None
-        for field in valid_values:
-            if field in key_values:
-                identifier_field = field
-                identifier_value = key_values[field]
-                break
-        if not identifier_field and valid_values:
-            identifier_field = next(iter(valid_values))
-            identifier_value = key_values.get(identifier_field)
+        if valid_values:
+            # Priorizar un campo presente en key_values
+            for field in valid_values.keys():
+                if field in key_values:
+                    identifier_field = field
+                    identifier_value = key_values[field]
+                    break
+            # Si no hay coincidencias, tomar el primer campo categórico disponible
+            if not identifier_field:
+                identifier_field = next(iter(valid_values))
+                identifier_value = key_values.get(identifier_field)
+        logger.info(f"Selected identifier_field: {identifier_field}, identifier_value: {identifier_value}")
 
         fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures, start_date, end_date))
         analysis_notes = [fetch_result.get("message", "")] if fetch_result.get("message") else []
@@ -875,34 +881,36 @@ def analyze_compliance(
         if not date_field:
             analysis_notes.append("No date field detected; date filters ignored.")
 
+        # Obtener identificadores únicos basados en identifier_field
         identifiers = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
         sop_content = {}
-        for identifier in identifiers:
-            if identifier_field == "machine":
+        if identifiers and identifier_field:
+            for identifier in identifiers:
+                # Intentar cargar un PDF para el identificador
                 pdf_result = json.loads(get_pdf_content(ctx, f"{identifier}.pdf"))
                 if pdf_result["status"] == "success":
                     sop_content[identifier] = pdf_result["content"]
                     logger.info(f"SOP content for {identifier_field}={identifier}: {sop_content[identifier][:100]}...")
                 else:
                     sop_content[identifier] = ""
-                    analysis_notes.append(f"Failed to load SOP for {identifier}: {pdf_result['message']}")
-                    logger.warning(f"Failed to load SOP for {identifier}: {pdf_result['message']}")
-            else:
-                sop_content[identifier] = ""
-                analysis_notes.append(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
-                logger.info(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
+                    analysis_notes.append(f"Failed to load SOP for {identifier_field}={identifier}: {pdf_result['message']}")
+                    logger.warning(f"Failed to load SOP for {identifier_field}={identifier}: {pdf_result['message']}")
+        else:
+            analysis_notes.append("No identifier field or identifiers found; no SOPs loaded.")
+            logger.info("No identifier field or identifiers found; no SOPs loaded.")
 
+        # Cargar reglas personalizadas para los identificadores
         custom_rules = []
-        if identifiers and identifier_field == "machine":
+        if identifiers and identifier_field:
             custom_result = qdrant_client.scroll(
                 collection_name="custom_rules",
                 scroll_filter=models.Filter(must=[
-                    models.FieldCondition(key="machines", match=models.MatchAny(any=list(identifiers))),
+                    models.FieldCondition(key=identifier_field, match=models.MatchAny(any=list(identifiers))),
                 ]),
                 limit=100
             )
             custom_rules = [r.payload for r in custom_result[0]] if custom_result and custom_result[0] else []
-            logger.info(f"Custom rules: {len(custom_rules)}")
+            logger.info(f"Custom rules found: {len(custom_rules)}")
 
         results = []
         for record in fetch_result["data"]:
