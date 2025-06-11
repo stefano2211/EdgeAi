@@ -42,6 +42,7 @@ services:
       - API_URL=http://api:5000
       - API_USERNAME=admin
       - API_PASSWORD=password123
+      - ENCRYPTION_KEY=2X3y5z7A9bCdEfGhIjKlMnOpQrStUvWxYz012345678=
     depends_on:
       api:
         condition: service_started

@@ -6,14 +6,15 @@ import logging
 import json
 import hashlib
 import re
+import os
 from minio import Minio
 from minio.error import S3Error
 import pdfplumber
 import io
-import os
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer
+from cryptography.fernet import Fernet, InvalidToken
 
 # Configuración del logger
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +28,11 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "sop-pdfs")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    logger.warning("ENCRYPTION_KEY not set, generating temporary key (not suitable for production)")
+    ENCRYPTION_KEY = Fernet.generate_key().decode()
+fernet = Fernet(ENCRYPTION_KEY.encode())
 
 # Inicialización de clientes
 model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -312,7 +318,7 @@ def get_pdf_content(ctx: Context, filename: str) -> str:
             response.release_conn()
         except S3Error as e:
             available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
-            logger.error(f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}")
+            logger.warning(f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}")
             return json.dumps({
                 "status": "error",
                 "message": f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}",
@@ -385,7 +391,7 @@ def fetch_mes_data(
     end_date: Optional[str] = None
 ) -> str:
     """
-    Recupera datos MES de la API y Qdrant.
+    Recupera datos MES de la API y Qdrant, encriptando payloads antes de almacenarlos.
     """
     try:
         key_values = key_values or {}
@@ -418,13 +424,26 @@ def fetch_mes_data(
                     "data": [],
                     "covered_dates": []
                 }, ensure_ascii=False)
+        # Recuperar datos de Qdrant y desencriptar payloads
         qdrant_results = qdrant_client.scroll(
             collection_name="mes_logs",
             scroll_filter=models.Filter(must=must_conditions) if must_conditions else None,
             limit=1000
         )
-        processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
+        processed_data = []
+        for r in qdrant_results[0] if qdrant_results[0] else []:
+            try:
+                encrypted_payload = r.payload.get("encrypted_payload")
+                if encrypted_payload:
+                    decrypted_data = fernet.decrypt(encrypted_payload.encode()).decode()
+                    processed_data.append(json.loads(decrypted_data))
+                else:
+                    logger.warning(f"No encrypted payload for point {r.id}")
+            except InvalidToken:
+                logger.error(f"Failed to decrypt payload for point {r.id}")
+                continue
         logger.info(f"Fetched {len(processed_data)} records from Qdrant for {key_values}")
+        # Obtener datos frescos de la API
         params = {}
         if start_date and end_date:
             params.update({"start_date": start_date, "end_date": end_date})
@@ -456,16 +475,20 @@ def fetch_mes_data(
                             record["date"] = (start + timedelta(days=i % delta)).strftime("%Y-%m-%d")
             except ValueError:
                 pass
+        # Encriptar y almacenar en Qdrant
         if full_data:
-            points = [
-                models.PointStruct(
-                    id=hashlib.md5(json.dumps(r).encode()).hexdigest(),
-                    vector=model.encode(json.dumps(r)).tolist(),
-                    payload=r
-                ) for r in full_data
-            ]
+            points = []
+            for r in full_data:
+                payload_json = json.dumps(r)
+                encrypted_payload = fernet.encrypt(payload_json.encode()).decode()
+                point = models.PointStruct(
+                    id=hashlib.md5(payload_json.encode()).hexdigest(),
+                    vector=model.encode(payload_json).tolist(),
+                    payload={"encrypted_payload": encrypted_payload}
+                )
+                points.append(point)
             qdrant_client.upsert(collection_name="mes_logs", points=points)
-            logger.info(f"Stored {len(points)} points in Qdrant mes_logs")
+            logger.info(f"Stored {len(points)} encrypted points in Qdrant mes_logs")
         if not processed_data:
             data_filters = {k: v for k, v in key_values.items()}
             processed_data = [
