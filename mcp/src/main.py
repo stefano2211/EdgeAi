@@ -329,7 +329,14 @@ class DataValidator:
 @mcp.tool()
 def get_pdf_content(ctx: Context, filename: str) -> str:
     """
-    Obtiene el contenido de un PDF desde MinIO.
+    Obtiene el contenido de un PDF almacenado en MinIO.
+
+    Args:
+        ctx (Context): Contexto del FastMCP.
+        filename (str): Nombre del archivo PDF en el bucket de MinIO.
+
+    Returns:
+        str: JSON con estado, nombre del archivo y contenido extraído o mensaje de error.
     """
     try:
         try:
@@ -365,7 +372,13 @@ def get_pdf_content(ctx: Context, filename: str) -> str:
 @mcp.tool()
 def list_fields(ctx: Context) -> str:
     """
-    Lista los campos disponibles en la API MES.
+    Lista los campos disponibles en la API MES, clasificados en numéricos y categóricos.
+
+    Args:
+        ctx (Context): Contexto del FastMCP.
+
+    Returns:
+        str: JSON con campos numéricos (key_figures), categóricos (key_values) o mensaje de error.
     """
     try:
         response = auth_client.get("/machines/")
@@ -413,7 +426,49 @@ def fetch_mes_data(
     specific_dates: Optional[List[str]] = None
 ) -> str:
     """
-    Recupera datos MES de la API y Qdrant, encriptando payloads antes de almacenarlos.
+    Recupera datos del sistema MES desde la API y Qdrant, aplicando filtros y encriptando los payloads antes de almacenarlos.
+
+    Esta herramienta permite consultar datos de manufactura filtrados por campos categóricos, métricas numéricas y fechas específicas o rangos de fechas. Los datos se recuperan primero desde Qdrant (si están disponibles) y, si es necesario, desde la API MES. Los registros se encriptan y almacenan en Qdrant con embeddings semánticos para búsquedas futuras.
+
+    Args:
+        ctx (Context): Contexto del FastMCP, necesario para la ejecución de la herramienta.
+        key_values (Optional[Dict[str, str]]): Diccionario de filtros categóricos (por ejemplo, {"machine": "ModelA"}). Default: None.
+        key_figures (Optional[List[str]]): Lista de métricas numéricas a recuperar (por ejemplo, ["defects", "uptime"]). Default: None.
+        start_date (Optional[str]): Fecha de inicio del rango en formato YYYY-MM-DD. Requiere end_date si se especifica. Default: None.
+        end_date (Optional[str]): Fecha de fin del rango en formato YYYY-MM-DD. Requiere start_date si se especifica. Default: None.
+        specific_dates (Optional[List[str]]): Lista de fechas específicas en formato YYYY-MM-DD (por ejemplo, ["2025-04-09", "2025-04-11"]). No se puede combinar con start_date/end_date. Default: None.
+
+    Returns:
+        str: JSON con los siguientes campos:
+            - status (str): "success", "no_data" o "error".
+            - count (int): Número de registros recuperados.
+            - data (List[Dict]): Lista de registros filtrados, cada uno con los campos solicitados.
+            - message (str): Descripción del resultado o error.
+            - covered_dates (List[str]): Fechas cubiertas por los datos.
+
+    Raises:
+        ValueError: Si los parámetros son inválidos (por ejemplo, fechas mal formateadas, campos desconocidos).
+        Exception: Para errores generales como fallos en la API, Qdrant o encriptación.
+
+    Example:
+        Consulta: Recuperar defectos de ModelA para los días 2025-04-09 y 2025-04-11.
+        Input:
+            {
+                "key_values": {"machine": "ModelA"},
+                "key_figures": ["defects"],
+                "specific_dates": ["2025-04-09", "2025-04-11"]
+            }
+        Output:
+            {
+                "status": "success",
+                "count": 2,
+                "data": [
+                    {"date": "2025-04-09", "machine": "ModelA", "defects": 1},
+                    {"date": "2025-04-11", "machine": "ModelA", "defects": 1}
+                ],
+                "message": "Datos encontrados para 2 de 2 fechas solicitadas.",
+                "covered_dates": ["2025-04-09", "2025-04-11"]
+            }
     """
     try:
         key_values = key_values or {}
@@ -582,7 +637,19 @@ def add_custom_rule(
     description: str = ""
 ) -> str:
     """
-    Añade una regla personalizada a Qdrant.
+    Añade una regla personalizada a Qdrant para el análisis de cumplimiento.
+
+    Args:
+        ctx (Context): Contexto del FastMCP.
+        machines (Union[List[str], str]): Lista o cadena de nombres de máquinas.
+        key_figures (Union[Dict[str, float], str]): Métricas y valores umbral.
+        key_values (Optional[Dict[str, str]]): Filtros categóricos. Default: None.
+        operator (str): Operador de comparación (por ejemplo, "<="). Default: "<=".
+        unit (Optional[str]): Unidad de medida. Default: None.
+        description (str): Descripción de la regla. Default: "".
+
+    Returns:
+        str: JSON con estado, mensaje y detalles de la regla añadida o error.
     """
     try:
         if isinstance(machines, str):
@@ -700,7 +767,16 @@ def list_custom_rules(
     limit: int = 10
 ) -> str:
     """
-    Lista las reglas personalizadas almacenadas en Qdrant.
+    Lista las reglas personalizadas almacenadas en Qdrant, con filtros opcionales.
+
+    Args:
+        ctx (Context): Contexto del FastMCP.
+        rule_id (Optional[str]): ID específico de la regla. Default: None.
+        machine (Optional[str]): Máquina asociada a la regla. Default: None.
+        limit (int): Máximo número de reglas a devolver. Default: 10.
+
+    Returns:
+        str: JSON con lista de reglas, conteo y metadatos o mensaje de error.
     """
     try:
         filter_conditions = []
@@ -767,7 +843,14 @@ def delete_custom_rule(
     rule_id: str
 ) -> str:
     """
-    Elimina una regla personalizada de Qdrant.
+    Elimina una regla personalizada de Qdrant por su ID.
+
+    Args:
+        ctx (Context): Contexto del FastMCP.
+        rule_id (str): ID de la regla a eliminar.
+
+    Returns:
+        str: JSON con estado, mensaje y detalles de la regla eliminada o error.
     """
     try:
         existing = qdrant_client.retrieve(
@@ -1025,16 +1108,21 @@ def analyze_compliance(
             "results": [],
             "analysis_notes": [str(e)]
         }, ensure_ascii=False)
-    
+
 @mcp.tool()
 def list_mcp_tools(ctx: Context) -> str:
     """
-    Lista todas las herramientas disponibles en el Manufacturing Compliance Processor (MCP).
+    Lista todas las herramientas registradas en el Manufacturing Compliance Processor.
+
+    Args:
+        ctx (Context): Contexto del FastMCP.
+
+    Returns:
+        str: JSON con lista de herramientas, incluyendo nombres, descripciones y parámetros.
     """
     try:
         tools = []
         for tool_name, tool_func in mcp.tools.items():
-            # Obtener la firma de la función para extraer parámetros
             sig = inspect.signature(tool_func)
             parameters = [
                 {
@@ -1044,7 +1132,6 @@ def list_mcp_tools(ctx: Context) -> str:
                 }
                 for param_name, param in sig.parameters.items() if param_name != "ctx"
             ]
-            # Obtener la descripción del docstring
             doc = inspect.getdoc(tool_func) or "No description available"
             tools.append({
                 "name": tool_name,
@@ -1066,7 +1153,6 @@ def list_mcp_tools(ctx: Context) -> str:
             "count": 0,
             "tools": []
         }, ensure_ascii=False)
-
 
 if __name__ == "__main__":
     init_infrastructure()
