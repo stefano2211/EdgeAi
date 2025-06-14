@@ -122,37 +122,50 @@ def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
         logger.warning("No date field detected in the provided records")
         return None
 
-def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dict:
+def check_date_coverage(data: List[Dict], start_date: Optional[str], end_date: Optional[str], specific_dates: Optional[List[str]] = None) -> Dict:
     """
-    Verifica la cobertura de fechas en los datos.
+    Verifica la cobertura de fechas en los datos, considerando fechas específicas o rango de fechas.
     """
     if not data:
+        message = "No se encontraron registros."
+        if specific_dates:
+            message = f"No se encontraron registros para las fechas específicas: {', '.join(specific_dates)}."
+        elif start_date and end_date:
+            message = f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
         return {
             "has_data": False,
             "covered_dates": [],
-            "message": f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
+            "message": message
         }
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-    expected_dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((end - start).days + 1)]
+
     covered_dates = sorted(set(r["date"] for r in data if r.get("date") and r["date"] != "Desconocida"))
-    if not covered_dates:
-        return {
-            "has_data": False,
-            "covered_dates": [],
-            "message": f"No se encontraron registros con fechas válidas en el rango del {start_date} al {end_date}."
-        }
-    has_start = start_date in covered_dates
-    has_end = end_date in covered_dates
-    missing_dates = [d for d in expected_dates if d not in covered_dates]
-    if not missing_dates:
-        message = "Se encontraron registros para todas las fechas en el rango solicitado."
-    elif has_start and not has_end:
-        message = f"Se encontraron registros para {start_date}, pero no para {end_date} ni fechas posteriores en el rango."
-    elif covered_dates:
-        message = f"Solo se encontraron datos para las fechas {', '.join(covered_dates)} dentro del rango solicitado."
+
+    if specific_dates:
+        expected_dates = [detect_and_normalize_date(d) for d in specific_dates if detect_and_normalize_date(d)]
+        if not expected_dates:
+            return {
+                "has_data": False,
+                "covered_dates": [],
+                "message": "No se proporcionaron fechas válidas en specific_dates."
+            }
+        missing_dates = [d for d in expected_dates if d not in covered_dates]
+        message = f"Datos encontrados para {len(covered_dates)} de {len(expected_dates)} fechas solicitadas."
+        if missing_dates:
+            message += f" Fechas faltantes: {', '.join(missing_dates)}."
+    elif start_date and end_date:
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        expected_dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((end - start).days + 1)]
+        missing_dates = [d for d in expected_dates if d not in covered_dates]
+        if not missing_dates:
+            message = "Se encontraron registros para todas las fechas en el rango solicitado."
+        elif covered_dates:
+            message = f"Solo se encontraron datos para las fechas {', '.join(covered_dates)} dentro del rango solicitado."
+        else:
+            message = f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
     else:
-        message = f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
+        message = "Datos recuperados exitosamente sin filtros de fecha."
+
     return {
         "has_data": bool(covered_dates),
         "covered_dates": covered_dates,
@@ -272,7 +285,7 @@ class DataValidator:
         return normalized_date
 
     @staticmethod
-    def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict:
+    def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict, start_date: Optional[str] = None, end_date: Optional[str] = None, specific_dates: Optional[List[str]] = None) -> Dict:
         try:
             fields_info = json.loads(list_fields(ctx))
             if fields_info["status"] != "success":
@@ -280,11 +293,17 @@ class DataValidator:
                 raise ValueError("No se pudo validar contra la API")
             if (start_date and not end_date) or (end_date and not start_date):
                 raise ValueError("Se deben proporcionar tanto start_date como end_date")
+            if start_date and end_date and specific_dates:
+                raise ValueError("No se pueden usar start_date/end_date y specific_dates al mismo tiempo")
             if start_date and end_date:
                 start_date = DataValidator.validate_date(start_date, "start_date")
                 end_date = DataValidator.validate_date(end_date, "end_date")
                 if start_date > end_date:
                     raise ValueError("start_date no puede ser posterior a end_date")
+            if specific_dates:
+                specific_dates = [DataValidator.validate_date(d, f"specific_date[{i}]") for i, d in enumerate(specific_dates)]
+                if not specific_dates:
+                    raise ValueError("No se proporcionaron fechas válidas en specific_dates")
             errors = []
             invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
             if invalid_figures:
@@ -389,7 +408,8 @@ def fetch_mes_data(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    specific_dates: Optional[List[str]] = None
 ) -> str:
     """
     Recupera datos MES de la API y Qdrant, encriptando payloads antes de almacenarlos.
@@ -397,15 +417,29 @@ def fetch_mes_data(
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
-        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date)
+        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date, specific_dates)
         valid_figures = fields_info["key_figures"]
         valid_values = fields_info["key_values"]
-        logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}, start_date={start_date}, end_date={end_date}")
+        logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}, start_date={start_date}, end_date={end_date}, specific_dates={specific_dates}")
         must_conditions = []
         for k, v in key_values.items():
             if k in valid_values:
                 must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
-        if start_date and end_date:
+        if specific_dates:
+            normalized_dates = [detect_and_normalize_date(d) for d in specific_dates if detect_and_normalize_date(d)]
+            if not normalized_dates:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No se proporcionaron fechas válidas en specific_dates",
+                    "count": 0,
+                    "data": [],
+                    "covered_dates": []
+                }, ensure_ascii=False)
+            must_conditions.append(models.FieldCondition(
+                key="date",
+                match=models.MatchAny(any=normalized_dates)
+            ))
+        elif start_date and end_date:
             try:
                 start = datetime.strptime(start_date, "%Y-%m-%d")
                 end = datetime.strptime(end_date, "%Y-%m-%d")
@@ -446,7 +480,9 @@ def fetch_mes_data(
         logger.info(f"Fetched {len(processed_data)} records from Qdrant for {key_values}")
         # Obtener datos frescos de la API
         params = {}
-        if start_date and end_date:
+        if specific_dates:
+            params.update({"specific_date": specific_dates[0]})  # API soporta specific_date
+        elif start_date and end_date:
             params.update({"start_date": start_date, "end_date": end_date})
         response = auth_client.get("/machines/", params=params)
         response.raise_for_status()
@@ -465,7 +501,10 @@ def fetch_mes_data(
                 if field in record:
                     item[field] = record[field]
             full_data.append(item)
-        if full_data and start_date and end_date:
+        if full_data and specific_dates:
+            normalized_dates = [detect_and_normalize_date(d) for d in specific_dates if detect_and_normalize_date(d)]
+            full_data = [r for r in full_data if r.get("date") in normalized_dates]
+        elif full_data and start_date and end_date:
             try:
                 start = datetime.strptime(start_date, "%Y-%m-%d")
                 end = datetime.strptime(end_date, "%Y-%m-%d")
@@ -513,11 +552,7 @@ def fetch_mes_data(
             {k: r[k] for k in response_fields if k in r}
             for r in processed_data
         ]
-        coverage = check_date_coverage(response_data, start_date, end_date) if start_date and end_date else {
-            "has_data": bool(response_data),
-            "covered_dates": [],
-            "message": "No date range specified" if not response_data else "Data retrieved successfully"
-        }
+        coverage = check_date_coverage(response_data, start_date, end_date, specific_dates)
         return json.dumps({
             "status": "success" if response_data else "no_data",
             "count": len(response_data),
@@ -780,77 +815,119 @@ def analyze_compliance(
     key_values: Optional[Dict[str, str]] = None,
     key_figures: Optional[List[str]] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    specific_dates: Optional[List[str]] = None
 ) -> str:
     """
     Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
 
+    Esta función recupera datos del sistema MES, los compara con procedimientos operativos estándar (SOPs)
+    almacenados en MinIO y reglas personalizadas en Qdrant, y genera un informe de cumplimiento.
+
+    Args:
+        ctx (Context): Contexto de la solicitud proporcionado por el MCP.
+        key_values (Optional[Dict[str, str]]): Filtros categóricos (e.g., {"machine": "ModelA"}).
+        key_figures (Optional[List[str]]): Campos numéricos a analizar (e.g., ["temperature", "uptime"]).
+        start_date (Optional[str]): Fecha de inicio para el rango de análisis (formato YYYY-MM-DD).
+        end_date (Optional[str]): Fecha de fin para el rango de análisis (formato YYYY-MM-DD).
+        specific_dates (Optional[List[str]]): Lista de fechas específicas para el análisis (formato YYYY-MM-DD).
+
+    Returns:
+        str: Respuesta en formato JSON con el estado, resultados, contenido de SOPs, reglas aplicadas y notas.
+
     INSTRUCCIONES PARA EL LLM:
-    1. Antes de construir la consulta, llama a la función `list_fields` para obtener los campos disponibles en el dataset MES.
-    2. Usa los campos listados en `key_figures` (campos numéricos) y `key_values` (campos categóricos) para armar la consulta.
-    3. Solo utiliza campos que estén presentes en la respuesta de `list_fields`.
-    4. La estructura de la consulta debe ser:
-
-        {
-            "key_values": {
-                "<campo_categórico_1>": "<valor>",
-                "<campo_categórico_2>": "<valor>"
-            },
-            "key_figures": [
-                "<campo_numérico_1>",
-                "<campo_numérico_2>"
-            ],
-            "start_date": "2025-04-09",
-            "end_date": "2025-04-11"
-        }
-
-    5. Ejemplo dinámico (los campos deben ser seleccionados de la respuesta de `list_fields`):
-
-        Supón que `list_fields` devuelve:
-        {
-            "key_figures": ["temperature", "uptime", "vibration"],
-            "key_values": {
-                "machine": ["ModelA", "ModelB"],
-                "production_line": ["Line1", "Line2", "Line3"]
-            }
-        }
-
-        Entonces, una consulta válida sería:
-        {
-            "key_values": {
-                "machine": "ModelA",
-                "production_line": "Line3"
-            },
-            "key_figures": ["temperature", "uptime", "vibration"],
-            "start_date": "2025-04-09",
-            "end_date": "2025-04-11"
-        }
+    1. **Obtener campos válidos**: Antes de construir la consulta, llama a la función `list_fields` para obtener los
+       campos disponibles en el dataset MES (key_figures y key_values).
+    2. **Validar campos**: Usa solo campos presentes en la respuesta de `list_fields` para `key_figures` (numéricos) y
+       `key_values` (categóricos).
+    3. **Estructura de la consulta**: La consulta debe seguir esta estructura:
+       ```json
+       {
+           "key_values": {
+               "<campo_categórico_1>": "<valor>",
+               "<campo_categórico_2>": "<valor>"
+           },
+           "key_figures": [
+               "<campo_numérico_1>",
+               "<campo_numérico_2>"
+           ],
+           // Usa EITHER specific_dates OR start_date/end_date, no ambos
+           "specific_dates": ["YYYY-MM-DD", ...], // Para fechas específicas
+           // O
+           "start_date": "YYYY-MM-DD", // Para un rango de fechas
+           "end_date": "YYYY-MM-DD"
+       }
+       ```
+    4. **Cuándo usar specific_dates vs. start_date/end_date**:
+       - Usa `specific_dates` cuando la consulta menciona días concretos (e.g., "solo el 9 de abril de 2025" o
+         "9 y 11 de abril de 2025"). Ejemplo: `specific_dates: ["2025-04-09", "2025-04-11"]`.
+       - Usa `start_date` y `end_date` cuando la consulta menciona un rango de fechas (e.g., "del 9 al 11 de abril de
+         2025"). Ejemplo: `start_date: "2025-04-09", end_date: "2025-04-11"`.
+       - No combines `specific_dates` con `start_date`/`end_date` en la misma consulta.
+       - Si la consulta no especifica fechas, omite ambos parámetros.
+    5. **Ejemplo dinámico**:
+       Supón que `list_fields` devuelve:
+       ```json
+       {
+           "key_figures": ["temperature", "uptime", "vibration"],
+           "key_values": {
+               "machine": ["ModelA", "ModelB"],
+               "production_line": ["Line1", "Line2", "Line3"]
+           }
+       }
+       ```
+       Consultas válidas serían:
+       - Para fechas específicas:
+         ```json
+         {
+             "key_values": {
+                 "machine": "ModelA",
+                 "production_line": "Line3"
+             },
+             "key_figures": ["temperature", "uptime"],
+             "specific_dates": ["2025-04-09"]
+         }
+         ```
+       - Para un rango de fechas:
+         ```json
+         {
+             "key_values": {
+                 "machine": "ModelA",
+                 "production_line": "Line3"
+             },
+             "key_figures": ["temperature", "uptime"],
+             "start_date": "2025-04-09",
+             "end_date": "2025-04-11"
+         }
+         ```
+    6. **Manejo de errores**:
+       - Si los campos en `key_values` o `key_figures` no están en `list_fields`, ignora la consulta y devuelve un mensaje
+         de error solicitando campos válidos.
+       - Si las fechas proporcionadas no tienen el formato correcto (YYYY-MM-DD), solicita al usuario que las corrija.
     """
     try:
         key_values = key_values or {}
         key_figures = key_figures or []
-        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date)
+        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date, specific_dates)
         valid_values = fields_info["key_values"]
         valid_figures = fields_info["key_figures"]
-        logger.info(f"Analyzing compliance: key_figures={key_figures}, key_values={key_values}, start_date={start_date}, end_date={end_date}")
+        logger.info(f"Analyzing compliance: key_figures={key_figures}, key_values={key_values}, start_date={start_date}, end_date={end_date}, specific_dates={specific_dates}")
 
         # Selección dinámica de identifier_field
         identifier_field = None
         identifier_value = None
         if valid_values:
-            # Priorizar un campo presente en key_values
             for field in valid_values.keys():
                 if field in key_values:
                     identifier_field = field
                     identifier_value = key_values[field]
                     break
-            # Si no hay coincidencias, tomar el primer campo categórico disponible
             if not identifier_field:
                 identifier_field = next(iter(valid_values))
                 identifier_value = key_values.get(identifier_field)
         logger.info(f"Selected identifier_field: {identifier_field}, identifier_value: {identifier_value}")
 
-        fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures, start_date, end_date))
+        fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures, start_date, end_date, specific_dates))
         analysis_notes = [fetch_result.get("message", "")] if fetch_result.get("message") else []
 
         if fetch_result["status"] == "no_data":
@@ -858,7 +935,7 @@ def analyze_compliance(
             return json.dumps({
                 "status": "no_data",
                 "message": fetch_result["message"],
-                "period": f"{start_date or 'N/A'} to {end_date or 'N/A'}",
+                "period": f"{start_date or 'N/A'} to {end_date or 'N/A'}" if start_date else f"Specific dates: {specific_dates or 'N/A'}",
                 "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
                 "metrics_analyzed": key_figures,
                 "results": [],
@@ -881,12 +958,10 @@ def analyze_compliance(
         if not date_field:
             analysis_notes.append("No date field detected; date filters ignored.")
 
-        # Obtener identificadores únicos basados en identifier_field
         identifiers = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
         sop_content = {}
         if identifiers and identifier_field:
             for identifier in identifiers:
-                # Intentar cargar un PDF para el identificador
                 pdf_result = json.loads(get_pdf_content(ctx, f"{identifier}.pdf"))
                 if pdf_result["status"] == "success":
                     sop_content[identifier] = pdf_result["content"]
@@ -899,7 +974,6 @@ def analyze_compliance(
             analysis_notes.append("No identifier field or identifiers found; no SOPs loaded.")
             logger.info("No identifier field or identifiers found; no SOPs loaded.")
 
-        # Cargar reglas personalizadas para los identificadores
         custom_rules = []
         if identifiers and identifier_field:
             custom_result = qdrant_client.scroll(
@@ -926,7 +1000,9 @@ def analyze_compliance(
             results.append(analysis)
 
         period = "all dates"
-        if start_date and end_date:
+        if specific_dates:
+            period = f"Specific dates: {', '.join(specific_dates)}"
+        elif start_date and end_date:
             period = f"{start_date} to {end_date}"
 
         return json.dumps({
