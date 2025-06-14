@@ -15,6 +15,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer
 from cryptography.fernet import Fernet, InvalidToken
+import inspect
 
 # Configuración del logger
 logging.basicConfig(level=logging.INFO)
@@ -1024,6 +1025,48 @@ def analyze_compliance(
             "results": [],
             "analysis_notes": [str(e)]
         }, ensure_ascii=False)
+    
+@mcp.tool()
+def list_mcp_tools(ctx: Context) -> str:
+    """
+    Lista todas las herramientas disponibles en el Manufacturing Compliance Processor (MCP).
+    """
+    try:
+        tools = []
+        for tool_name, tool_func in mcp.tools.items():
+            # Obtener la firma de la función para extraer parámetros
+            sig = inspect.signature(tool_func)
+            parameters = [
+                {
+                    "name": param_name,
+                    "type": str(param.annotation) if param.annotation != inspect.Parameter.empty else "Any",
+                    "default": str(param.default) if param.default != inspect.Parameter.empty else None
+                }
+                for param_name, param in sig.parameters.items() if param_name != "ctx"
+            ]
+            # Obtener la descripción del docstring
+            doc = inspect.getdoc(tool_func) or "No description available"
+            tools.append({
+                "name": tool_name,
+                "description": doc.strip(),
+                "parameters": parameters
+            })
+        logger.info(f"Retrieved {len(tools)} MCP tools")
+        return json.dumps({
+            "status": "success",
+            "count": len(tools),
+            "tools": tools,
+            "message": f"Found {len(tools)} tools in MCP"
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error listing MCP tools: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "count": 0,
+            "tools": []
+        }, ensure_ascii=False)
+
 
 if __name__ == "__main__":
     init_infrastructure()
