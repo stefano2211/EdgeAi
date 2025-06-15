@@ -493,7 +493,6 @@ def fetch_mes_data(
             "covered_dates": []
         }, ensure_ascii=False)
 
-
 @mcp.tool()
 def get_pdf_content(ctx: Context, filename: str) -> str:
     """
@@ -570,8 +569,6 @@ def list_fields(ctx: Context) -> str:
             "key_figures": [],
             "key_values": {}
         }, ensure_ascii=False)
-
-
 
 @mcp.tool()
 def add_custom_rule(
@@ -1029,53 +1026,6 @@ def analyze_compliance(
         }, ensure_ascii=False)
 
 @mcp.tool()
-def list_mcp_tools(ctx: Context) -> str:
-    """
-    Lista todas las herramientas registradas en el Manufacturing Compliance Processor.
-
-    Args:
-        ctx (Context): Contexto del FastMCP.
-
-    Returns:
-        str: JSON con lista de herramientas, incluyendo nombres, descripciones y parámetros.
-    """
-    try:
-        tools = []
-        for tool_name, tool_func in mcp.tools.items():
-            # Obtener la firma de la función para extraer parámetros
-            sig = inspect.signature(tool_func)
-            parameters = [
-                {
-                    "name": param_name,
-                    "type": str(param.annotation) if param.annotation != inspect.Parameter.empty else "Any",
-                    "default": str(param.default) if param.default != inspect.Parameter.empty else None
-                }
-                for param_name, param in sig.parameters.items() if param_name != "ctx"
-            ]
-            # Obtener la descripción del docstring
-            doc = inspect.getdoc(tool_func) or "No description available"
-            tools.append({
-                "name": tool_name,
-                "description": doc.strip(),
-                "parameters": parameters
-            })
-        logger.info(f"Retrieved {len(tools)} MCP tools")
-        return json.dumps({
-            "status": "success",
-            "count": len(tools),
-            "tools": tools,
-            "message": f"Found {len(tools)} tools in MCP"
-        }, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Error listing MCP tools: {str(e)}")
-        return json.dumps({
-            "status": "error",
-            "message": str(e),
-            "count": 0,
-            "tools": []
-        }, ensure_ascii=False)
-
-@mcp.tool()
 def get_mes_dataset(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
@@ -1085,7 +1035,6 @@ def get_mes_dataset(
     specific_dates: Optional[List[str]] = None
 ) -> str:
     """
-    
     Recupera datos del sistema MES aplicando filtros por campos categóricos, métricas numéricas y fechas.
 
     INSTRUCCIONES PARA EL LLM:
@@ -1107,6 +1056,13 @@ def get_mes_dataset(
            "key_figures": ["defects"],
            "start_date": "2025-04-09",
            "end_date": "2025-04-11"
+       }
+    3. Sin filtros:
+       {
+           "key_values": {"machine": "ModelA"},
+           "key_figures": [],
+           "start_date": "2025-04-09",
+           "end_date": "2025-04-11",
        }
 
     Args:
@@ -1252,6 +1208,99 @@ def get_mes_dataset(
     except Exception as e:
         logger.error(f"Dataset retrieval failed: {str(e)}")
         return json.dumps([], ensure_ascii=False)
+
+@mcp.tool()
+def list_available_tools(ctx: Context) -> str:
+    """
+    Lista todas las herramientas disponibles de Mess definidas con el decorador @mcp.tool().
+    """
+    try:
+        tools = []
+        # Intento 1: Acceder al registro interno de herramientas de FastMCP
+        try:
+            # Asumimos que mcp tiene un atributo 'tools' o método 'get_tools'
+            if hasattr(mcp, 'tools'):
+                tool_registry = mcp.tools
+                logger.info("Accediendo al registro interno de herramientas de FastMCP")
+            elif hasattr(mcp, 'get_tools'):
+                tool_registry = mcp.get_tools()
+                logger.info("Accediendo a get_tools() de FastMCP")
+            else:
+                tool_registry = None
+                logger.warning("No se encontró registro interno de herramientas en FastMCP")
+
+            if tool_registry:
+                for tool_name, tool_func in tool_registry.items():
+                    if callable(tool_func):
+                        signature = inspect.signature(tool_func)
+                        parameters = [
+                            {
+                                "name": param_name,
+                                "type": str(param.annotation) if param.annotation != inspect.Parameter.empty else "Any",
+                                "default": param.default if param.default != inspect.Parameter.empty else None
+                            }
+                            for param_name, param in signature.parameters.items()
+                            if param_name != 'ctx'
+                        ]
+                        docstring = inspect.getdoc(tool_func) or "Sin descripción disponible."
+                        tools.append({
+                            "name": tool_name,
+                            "description": docstring,
+                            "parameters": parameters
+                        })
+                        logger.debug(f"Tool registrada desde FastMCP: {tool_name}")
+        except Exception as e:
+            logger.warning(f"Fallo al acceder al registro interno de FastMCP: {str(e)}")
+
+        # Intento 2: Inspección del módulo como respaldo
+        if not tools:
+            logger.info("Realizando inspección del módulo como respaldo")
+            module = inspect.getmodule(inspect.currentframe())
+            for name, obj in inspect.getmembers(module):
+                if inspect.isfunction(obj):
+                    # Verificar si la función está decorada con @mcp.tool()
+                    try:
+                        # Inspeccionar el código fuente para buscar el decorador
+                        source = inspect.getsource(obj)
+                        if '@mcp.tool' in source:
+                            signature = inspect.signature(obj)
+                            parameters = [
+                                {
+                                    "name": param_name,
+                                    "type": str(param.annotation) if param.annotation != inspect.Parameter.empty else "Any",
+                                    "default": param.default if param.default != inspect.Parameter.empty else None
+                                }
+                                for param_name, param in signature.parameters.items()
+                                if param_name != 'ctx'
+                            ]
+                            docstring = inspect.getdoc(obj) or "Sin descripción disponible."
+                            tools.append({
+                                "name": name,
+                                "description": docstring,
+                                "parameters": parameters
+                            })
+                            logger.debug(f"Tool detectada por inspección: {name}")
+                    except Exception as e:
+                        logger.debug(f"No se pudo inspeccionar la función {name}: {str(e)}")
+
+        if not tools:
+            logger.warning("No se encontraron herramientas disponibles")
+
+        logger.info(f"Retrieved {len(tools)} available tools")
+        return json.dumps({
+            "status": "success" if tools else "no_data",
+            "count": len(tools),
+            "tools": tools,
+            "message": "Lista de herramientas recuperada exitosamente." if tools else "No se encontraron herramientas disponibles."
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Failed to list available tools: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "count": 0,
+            "tools": []
+        }, ensure_ascii=False)
 
 if __name__ == "__main__":
     init_infrastructure()
