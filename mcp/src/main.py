@@ -326,97 +326,6 @@ class DataValidator:
             logger.error(f"Fallo en validación de campos: {str(e)}")
             raise
 
-@mcp.tool()
-def get_pdf_content(ctx: Context, filename: str) -> str:
-    """
-    Obtiene el contenido de un PDF almacenado en MinIO.
-
-    Args:
-        ctx (Context): Contexto del FastMCP.
-        filename (str): Nombre del archivo PDF en el bucket de MinIO.
-
-    Returns:
-        str: JSON con estado, nombre del archivo y contenido extraído o mensaje de error.
-    """
-    try:
-        try:
-            response = minio_client.get_object(MINIO_BUCKET, filename)
-            pdf_data = response.read()
-            response.close()
-            response.release_conn()
-        except S3Error as e:
-            available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
-            logger.warning(f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}")
-            return json.dumps({
-                "status": "error",
-                "message": f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}",
-                "filename": filename,
-                "content": ""
-            }, ensure_ascii=False)
-        with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
-            content = "\n".join(page.extract_text() or "" for page in pdf.pages)
-        return json.dumps({
-            "status": "success",
-            "filename": filename,
-            "content": content
-        }, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Error extracting content from {filename}: {str(e)}")
-        return json.dumps({
-            "status": "error",
-            "message": str(e),
-            "filename": filename,
-            "content": ""
-        }, ensure_ascii=False)
-
-@mcp.tool()
-def list_fields(ctx: Context) -> str:
-    """
-    Lista los campos disponibles en la API MES, clasificados en numéricos y categóricos.
-
-    Args:
-        ctx (Context): Contexto del FastMCP.
-
-    Returns:
-        str: JSON con campos numéricos (key_figures), categóricos (key_values) o mensaje de error.
-    """
-    try:
-        response = auth_client.get("/machines/")
-        response.raise_for_status()
-        records = response.json()
-        if not records:
-            logger.warning("No se encontraron registros en el sistema MES")
-            return json.dumps({
-                "status": "no_data",
-                "message": "No se encontraron registros en el sistema MES",
-                "key_figures": [],
-                "key_values": {}
-            })
-        sample = records[0]
-        key_figures = []
-        key_values = {}
-        for field, value in sample.items():
-            if isinstance(value, (int, float)):
-                key_figures.append(field)
-            elif isinstance(value, str):
-                unique_values = sorted({rec[field] for rec in records if field in rec})
-                key_values[field] = unique_values
-        logger.info(f"Fields listed: key_figures={key_figures}, key_values={key_values}")
-        return json.dumps({
-            "status": "success",
-            "key_figures": key_figures,
-            "key_values": key_values
-        }, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Field listing failed: {str(e)}")
-        return json.dumps({
-            "status": "error",
-            "message": str(e),
-            "key_figures": [],
-            "key_values": {}
-        }, ensure_ascii=False)
-
-@mcp.tool()
 def fetch_mes_data(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
@@ -426,49 +335,7 @@ def fetch_mes_data(
     specific_dates: Optional[List[str]] = None
 ) -> str:
     """
-    Recupera datos del sistema MES desde la API y Qdrant, aplicando filtros y encriptando los payloads antes de almacenarlos.
-
-    Esta herramienta permite consultar datos de manufactura filtrados por campos categóricos, métricas numéricas y fechas específicas o rangos de fechas. Los datos se recuperan primero desde Qdrant (si están disponibles) y, si es necesario, desde la API MES. Los registros se encriptan y almacenan en Qdrant con embeddings semánticos para búsquedas futuras.
-
-    Args:
-        ctx (Context): Contexto del FastMCP, necesario para la ejecución de la herramienta.
-        key_values (Optional[Dict[str, str]]): Diccionario de filtros categóricos (por ejemplo, {"machine": "ModelA"}). Default: None.
-        key_figures (Optional[List[str]]): Lista de métricas numéricas a recuperar (por ejemplo, ["defects", "uptime"]). Default: None.
-        start_date (Optional[str]): Fecha de inicio del rango en formato YYYY-MM-DD. Requiere end_date si se especifica. Default: None.
-        end_date (Optional[str]): Fecha de fin del rango en formato YYYY-MM-DD. Requiere start_date si se especifica. Default: None.
-        specific_dates (Optional[List[str]]): Lista de fechas específicas en formato YYYY-MM-DD (por ejemplo, ["2025-04-09", "2025-04-11"]). No se puede combinar con start_date/end_date. Default: None.
-
-    Returns:
-        str: JSON con los siguientes campos:
-            - status (str): "success", "no_data" o "error".
-            - count (int): Número de registros recuperados.
-            - data (List[Dict]): Lista de registros filtrados, cada uno con los campos solicitados.
-            - message (str): Descripción del resultado o error.
-            - covered_dates (List[str]): Fechas cubiertas por los datos.
-
-    Raises:
-        ValueError: Si los parámetros son inválidos (por ejemplo, fechas mal formateadas, campos desconocidos).
-        Exception: Para errores generales como fallos en la API, Qdrant o encriptación.
-
-    Example:
-        Consulta: Recuperar defectos de ModelA para los días 2025-04-09 y 2025-04-11.
-        Input:
-            {
-                "key_values": {"machine": "ModelA"},
-                "key_figures": ["defects"],
-                "specific_dates": ["2025-04-09", "2025-04-11"]
-            }
-        Output:
-            {
-                "status": "success",
-                "count": 2,
-                "data": [
-                    {"date": "2025-04-09", "machine": "ModelA", "defects": 1},
-                    {"date": "2025-04-11", "machine": "ModelA", "defects": 1}
-                ],
-                "message": "Datos encontrados para 2 de 2 fechas solicitadas.",
-                "covered_dates": ["2025-04-09", "2025-04-11"]
-            }
+    Recupera datos MES de la API y Qdrant, encriptando payloads antes de almacenarlos.
     """
     try:
         key_values = key_values or {}
@@ -626,6 +493,86 @@ def fetch_mes_data(
             "covered_dates": []
         }, ensure_ascii=False)
 
+
+@mcp.tool()
+def get_pdf_content(ctx: Context, filename: str) -> str:
+    """
+    Obtiene el contenido de un PDF desde MinIO.
+    """
+    try:
+        try:
+            response = minio_client.get_object(MINIO_BUCKET, filename)
+            pdf_data = response.read()
+            response.close()
+            response.release_conn()
+        except S3Error as e:
+            available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
+            logger.warning(f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}")
+            return json.dumps({
+                "status": "error",
+                "message": f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}",
+                "filename": filename,
+                "content": ""
+            }, ensure_ascii=False)
+        with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
+            content = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        return json.dumps({
+            "status": "success",
+            "filename": filename,
+            "content": content
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error extracting content from {filename}: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "filename": filename,
+            "content": ""
+        }, ensure_ascii=False)
+
+@mcp.tool()
+def list_fields(ctx: Context) -> str:
+    """
+    Lista los campos disponibles en la API MES.
+    """
+    try:
+        response = auth_client.get("/machines/")
+        response.raise_for_status()
+        records = response.json()
+        if not records:
+            logger.warning("No se encontraron registros en el sistema MES")
+            return json.dumps({
+                "status": "no_data",
+                "message": "No se encontraron registros en el sistema MES",
+                "key_figures": [],
+                "key_values": {}
+            })
+        sample = records[0]
+        key_figures = []
+        key_values = {}
+        for field, value in sample.items():
+            if isinstance(value, (int, float)):
+                key_figures.append(field)
+            elif isinstance(value, str):
+                unique_values = sorted({rec[field] for rec in records if field in rec})
+                key_values[field] = unique_values
+        logger.info(f"Fields listed: key_figures={key_figures}, key_values={key_values}")
+        return json.dumps({
+            "status": "success",
+            "key_figures": key_figures,
+            "key_values": key_values
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Field listing failed: {str(e)}")
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "key_figures": [],
+            "key_values": {}
+        }, ensure_ascii=False)
+
+
+
 @mcp.tool()
 def add_custom_rule(
     ctx: Context,
@@ -637,19 +584,7 @@ def add_custom_rule(
     description: str = ""
 ) -> str:
     """
-    Añade una regla personalizada a Qdrant para el análisis de cumplimiento.
-
-    Args:
-        ctx (Context): Contexto del FastMCP.
-        machines (Union[List[str], str]): Lista o cadena de nombres de máquinas.
-        key_figures (Union[Dict[str, float], str]): Métricas y valores umbral.
-        key_values (Optional[Dict[str, str]]): Filtros categóricos. Default: None.
-        operator (str): Operador de comparación (por ejemplo, "<="). Default: "<=".
-        unit (Optional[str]): Unidad de medida. Default: None.
-        description (str): Descripción de la regla. Default: "".
-
-    Returns:
-        str: JSON con estado, mensaje y detalles de la regla añadida o error.
+    Añade una regla personalizada a Qdrant.
     """
     try:
         if isinstance(machines, str):
@@ -767,16 +702,7 @@ def list_custom_rules(
     limit: int = 10
 ) -> str:
     """
-    Lista las reglas personalizadas almacenadas en Qdrant, con filtros opcionales.
-
-    Args:
-        ctx (Context): Contexto del FastMCP.
-        rule_id (Optional[str]): ID específico de la regla. Default: None.
-        machine (Optional[str]): Máquina asociada a la regla. Default: None.
-        limit (int): Máximo número de reglas a devolver. Default: 10.
-
-    Returns:
-        str: JSON con lista de reglas, conteo y metadatos o mensaje de error.
+    Lista las reglas personalizadas almacenadas en Qdrant.
     """
     try:
         filter_conditions = []
@@ -843,14 +769,7 @@ def delete_custom_rule(
     rule_id: str
 ) -> str:
     """
-    Elimina una regla personalizada de Qdrant por su ID.
-
-    Args:
-        ctx (Context): Contexto del FastMCP.
-        rule_id (str): ID de la regla a eliminar.
-
-    Returns:
-        str: JSON con estado, mensaje y detalles de la regla eliminada o error.
+    Elimina una regla personalizada de Qdrant.
     """
     try:
         existing = qdrant_client.retrieve(
@@ -1123,6 +1042,7 @@ def list_mcp_tools(ctx: Context) -> str:
     try:
         tools = []
         for tool_name, tool_func in mcp.tools.items():
+            # Obtener la firma de la función para extraer parámetros
             sig = inspect.signature(tool_func)
             parameters = [
                 {
@@ -1132,6 +1052,7 @@ def list_mcp_tools(ctx: Context) -> str:
                 }
                 for param_name, param in sig.parameters.items() if param_name != "ctx"
             ]
+            # Obtener la descripción del docstring
             doc = inspect.getdoc(tool_func) or "No description available"
             tools.append({
                 "name": tool_name,
@@ -1153,6 +1074,184 @@ def list_mcp_tools(ctx: Context) -> str:
             "count": 0,
             "tools": []
         }, ensure_ascii=False)
+
+@mcp.tool()
+def get_mes_dataset(
+    ctx: Context,
+    key_values: Optional[Dict[str, str]] = None,
+    key_figures: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    specific_dates: Optional[List[str]] = None
+) -> str:
+    """
+    
+    Recupera datos del sistema MES aplicando filtros por campos categóricos, métricas numéricas y fechas.
+
+    INSTRUCCIONES PARA EL LLM:
+    - Antes de construir la consulta, llama a `list_fields` para obtener los campos válidos (`key_figures` y `key_values`).
+    - Usa solo campos presentes en la respuesta de `list_fields`.
+    - Usa `specific_dates` (lista de fechas YYYY-MM-DD) para días concretos, o `start_date` y `end_date` (YYYY-MM-DD) para rangos. No combines ambos.
+    - Si los campos o fechas no son válidos, devuelve un mensaje de error solicitando corrección.
+
+    Ejemplos de uso:
+    1. Fechas específicas:
+       {
+           "key_values": {"machine": "ModelA"},
+           "key_figures": ["defects"],
+           "specific_dates": ["2025-04-09", "2025-04-11"]
+       }
+    2. Rango de fechas:
+       {
+           "key_values": {"machine": "ModelA"},
+           "key_figures": ["defects"],
+           "start_date": "2025-04-09",
+           "end_date": "2025-04-11"
+       }
+
+    Args:
+        ctx (Context): Contexto FastMCP.
+        key_values (Optional[Dict[str, str]]): Filtros categóricos.
+        key_figures (Optional[List[str]]): Métricas numéricas.
+        start_date (Optional[str]): Fecha inicio (YYYY-MM-DD).
+        end_date (Optional[str]): Fecha fin (YYYY-MM-DD).
+        specific_dates (Optional[List[str]]): Lista de fechas específicas (YYYY-MM-DD).
+
+    Returns:
+        str: JSON con status, count, data, message y covered_dates.
+    """
+    try:
+        key_values = key_values or {}
+        key_figures = key_figures or []
+        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date, specific_dates)
+        valid_figures = fields_info["key_figures"]
+        valid_values = fields_info["key_values"]
+        logger.info(f"Fetching MES dataset for key_values={key_values}, key_figures={key_figures}, start_date={start_date}, end_date={end_date}, specific_dates={specific_dates}")
+
+        # Construir condiciones de filtrado para Qdrant
+        must_conditions = []
+        for k, v in key_values.items():
+            if k in valid_values:
+                must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
+        if specific_dates:
+            normalized_dates = [detect_and_normalize_date(d) for d in specific_dates if detect_and_normalize_date(d)]
+            if not normalized_dates:
+                logger.error("No valid dates provided in specific_dates")
+                return json.dumps([], ensure_ascii=False)
+            must_conditions.append(models.FieldCondition(
+                key="date",
+                match=models.MatchAny(any=normalized_dates)
+            ))
+        elif start_date and end_date:
+            try:
+                start = datetime.strptime(start_date, "%Y-%m-%d")
+                end = datetime.strptime(end_date, "%Y-%m-%d")
+                delta = (end - start).days + 1
+                if delta > 0:
+                    date_range = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta)]
+                    must_conditions.append(models.FieldCondition(
+                        key="date",
+                        match=models.MatchAny(any=date_range)
+                    ))
+            except ValueError as e:
+                logger.error(f"Invalid date format: {str(e)}")
+                return json.dumps([], ensure_ascii=False)
+
+        # Recuperar datos de Qdrant
+        qdrant_results = qdrant_client.scroll(
+            collection_name="mes_logs",
+            scroll_filter=models.Filter(must=must_conditions) if must_conditions else None,
+            limit=1000
+        )
+        processed_data = []
+        for r in qdrant_results[0] if qdrant_results[0] else []:
+            try:
+                encrypted_payload = r.payload.get("encrypted_payload")
+                if encrypted_payload:
+                    decrypted_data = fernet.decrypt(encrypted_payload.encode()).decode()
+                    processed_data.append(json.loads(decrypted_data))
+                else:
+                    logger.warning(f"No encrypted payload for point {r.id}")
+            except InvalidToken:
+                logger.error(f"Failed to decrypt payload for point {r.id}")
+                continue
+        logger.info(f"Fetched {len(processed_data)} records from Qdrant for {key_values}")
+
+        # Obtener datos frescos de la API si no hay datos en Qdrant o si no hay filtros
+        if not processed_data or not (key_values or key_figures or start_date or end_date or specific_dates):
+            params = {}
+            if specific_dates:
+                params.update({"specific_date": specific_dates[0]})  # API soporta specific_date
+            elif start_date and end_date:
+                params.update({"start_date": start_date, "end_date": end_date})
+            response = auth_client.get("/machines/", params=params)
+            response.raise_for_status()
+            all_data = response.json()
+            date_field = find_date_field(all_data, fields_info)
+            logger.info(f"Detected date field: {date_field}")
+            full_data = []
+            for record in all_data:
+                item = {}
+                if date_field and date_field in record:
+                    normalized_date = detect_and_normalize_date(str(record[date_field]))
+                    item["date"] = normalized_date or "Desconocida"
+                else:
+                    item["date"] = "Desconocida"
+                for field in valid_figures + list(valid_values.keys()):
+                    if field in record:
+                        item[field] = record[field]
+                full_data.append(item)
+            if full_data and specific_dates:
+                normalized_dates = [detect_and_normalize_date(d) for d in specific_dates if detect_and_normalize_date(d)]
+                full_data = [r for r in full_data if r.get("date") in normalized_dates]
+            elif full_data and start_date and end_date:
+                try:
+                    start = datetime.strptime(start_date, "%Y-%m-%d")
+                    end = datetime.strptime(end_date, "%Y-%m-%d")
+                    delta = (end - start).days + 1
+                    if delta > 0:
+                        for i, record in enumerate(full_data):
+                            if record["date"] == "Desconocida":
+                                record["date"] = (start + timedelta(days=i % delta)).strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+            # Encriptar y almacenar en Qdrant
+            if full_data:
+                points = []
+                for r in full_data:
+                    payload_json = json.dumps(r)
+                    encrypted_payload = fernet.encrypt(payload_json.encode()).decode()
+                    point = models.PointStruct(
+                        id=hashlib.md5(payload_json.encode()).hexdigest(),
+                        vector=model.encode(payload_json).tolist(),
+                        payload={"encrypted_payload": encrypted_payload}
+                    )
+                    points.append(point)
+                qdrant_client.upsert(collection_name="mes_logs", points=points)
+                logger.info(f"Stored {len(points)} encrypted points in Qdrant mes_logs")
+            processed_data = full_data
+
+        # Filtrar datos en memoria si es necesario
+        if processed_data:
+            data_filters = {k: v for k, v in key_values.items()}
+            processed_data = [
+                r for r in processed_data
+                if all(r.get(k) == v for k, v in data_filters.items())
+            ]
+            logger.info(f"Filtered {len(processed_data)} records in memory for {data_filters}")
+
+        # Seleccionar campos solicitados
+        response_fields = ["date"] + list(key_values.keys()) + key_figures
+        response_data = [
+            {k: r[k] for k in response_fields if k in r}
+            for r in processed_data
+        ]
+
+        # Devolver solo los datos en JSON
+        return json.dumps(response_data, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Dataset retrieval failed: {str(e)}")
+        return json.dumps([], ensure_ascii=False)
 
 if __name__ == "__main__":
     init_infrastructure()
