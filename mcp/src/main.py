@@ -339,7 +339,23 @@ def fetch_mes_data(
     """
     try:
         key_values = key_values or {}
-        key_figures = key_figures or []
+        # Si no se proporcionan key_figures, obtener todos los campos numéricos desde list_fields
+        if not key_figures:
+            fields_info = json.loads(list_fields(ctx))
+            if fields_info["status"] != "success":
+                logger.error("No se pudieron obtener campos válidos")
+                return json.dumps({
+                    "status": "error",
+                    "message": "No se pudieron obtener campos válidos",
+                    "count": 0,
+                    "data": [],
+                    "covered_dates": []
+                }, ensure_ascii=False)
+            key_figures = fields_info["key_figures"]
+            logger.info(f"No key_figures provided, using all numeric fields: {key_figures}")
+        else:
+            key_figures = key_figures or []
+
         fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date, specific_dates)
         valid_figures = fields_info["key_figures"]
         valid_values = fields_info["key_values"]
@@ -900,6 +916,18 @@ def analyze_compliance(
              "end_date": "2025-04-11"
          }
          ```
+        - Para un rango de fechas sin key figures:
+         ```json
+         {
+             "key_values": {
+                "machine": "ModelA", 
+                "production_line": "Line3"
+             },
+             "key_figures": [],
+             "start_date": "2025-04-09",
+             "end_date": "2025-04-11"
+         }
+         ```
     6. **Manejo de errores**:
        - Si los campos en `key_values` o `key_figures` no están en `list_fields`, ignora la consulta y devuelve un mensaje
          de error solicitando campos válidos.
@@ -907,7 +935,22 @@ def analyze_compliance(
     """
     try:
         key_values = key_values or {}
-        key_figures = key_figures or []
+        # Si no se proporcionan key_figures, obtener todos los campos numéricos desde list_fields
+        if not key_figures:
+            fields_info = json.loads(list_fields(ctx))
+            if fields_info["status"] != "success":
+                logger.error("No se pudieron obtener campos válidos")
+                return json.dumps({
+                    "status": "error",
+                    "message": "No se pudieron obtener campos válidos",
+                    "results": [],
+                    "analysis_notes": ["No se pudieron obtener campos válidos"]
+                }, ensure_ascii=False)
+            key_figures = fields_info["key_figures"]
+            logger.info(f"No key_figures provided, using all numeric fields: {key_figures}")
+        else:
+            key_figures = key_figures or []
+
         fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date, specific_dates)
         valid_values = fields_info["key_values"]
         valid_figures = fields_info["key_figures"]
@@ -1074,11 +1117,21 @@ def get_mes_dataset(
         specific_dates (Optional[List[str]]): Lista de fechas específicas (YYYY-MM-DD).
 
     Returns:
-        str: JSON con status, count, data, message y covered_dates.
+        str: JSON con los datos filtrados.
     """
     try:
         key_values = key_values or {}
-        key_figures = key_figures or []
+        # Si no se proporcionan key_figures, obtener todos los campos numéricos desde list_fields
+        if not key_figures:
+            fields_info = json.loads(list_fields(ctx))
+            if fields_info["status"] != "success":
+                logger.error("No se pudieron obtener campos válidos")
+                return json.dumps([], ensure_ascii=False)
+            key_figures = fields_info["key_figures"]
+            logger.info(f"No key_figures provided, using all numeric fields: {key_figures}")
+        else:
+            key_figures = key_figures or []
+
         fields_info = DataValidator.validate_fields(ctx, key_figures, key_values, start_date, end_date, specific_dates)
         valid_figures = fields_info["key_figures"]
         valid_values = fields_info["key_values"]
@@ -1212,13 +1265,12 @@ def get_mes_dataset(
 @mcp.tool()
 def list_available_tools(ctx: Context) -> str:
     """
-    Lista todas las herramientas disponibles de Mess definidas con el decorador @mcp.tool().
+    Lista todas las herramientas disponibles definidas con el decorador @mcp.tool().
     """
     try:
         tools = []
         # Intento 1: Acceder al registro interno de herramientas de FastMCP
         try:
-            # Asumimos que mcp tiene un atributo 'tools' o método 'get_tools'
             if hasattr(mcp, 'tools'):
                 tool_registry = mcp.tools
                 logger.info("Accediendo al registro interno de herramientas de FastMCP")
@@ -1258,9 +1310,7 @@ def list_available_tools(ctx: Context) -> str:
             module = inspect.getmodule(inspect.currentframe())
             for name, obj in inspect.getmembers(module):
                 if inspect.isfunction(obj):
-                    # Verificar si la función está decorada con @mcp.tool()
                     try:
-                        # Inspeccionar el código fuente para buscar el decorador
                         source = inspect.getsource(obj)
                         if '@mcp.tool' in source:
                             signature = inspect.signature(obj)
