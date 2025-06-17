@@ -39,26 +39,24 @@ def init_db():
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
         
-        # Tabla para máquinas
+        # Tabla para máquinas con nuevas columnas
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS machines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 machine TEXT NOT NULL,
-                production_line TEXT NOT NULL,
-                material TEXT NOT NULL,
-                batch_id TEXT NOT NULL,
-                uptime REAL NOT NULL,
-                defects INTEGER NOT NULL,
-                vibration REAL NOT NULL,
-                temperature REAL NOT NULL,
-                defect_type TEXT NOT NULL,
-                throughput REAL NOT NULL,
-                inventory_level INTEGER NOT NULL
+                operator_id TEXT NOT NULL,
+                operation_mode TEXT NOT NULL,
+                energy_consumption REAL NOT NULL,
+                production_rate REAL NOT NULL,
+                error_code TEXT NOT NULL,
+                maintenance_status TEXT NOT NULL,
+                cycle_time REAL NOT NULL,
+                quality_score INTEGER NOT NULL
             )
         """)
         
-        # Tabla para tokens de sesión (expiry ahora es opcional)
+        # Tabla para tokens de sesión (sin cambios)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
@@ -67,7 +65,7 @@ def init_db():
             )
         """)
         
-        # Tabla para usuarios
+        # Tabla para usuarios (sin cambios)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
@@ -75,32 +73,32 @@ def init_db():
             )
         """)
         
-        # Insertar registros fijos para máquinas
+        # Insertar registros fijos para máquinas con datos nuevos
         cursor.execute("SELECT COUNT(*) FROM machines")
         count = cursor.fetchone()[0]
         if count == 0:
             fixed_records = [
-                ("2025-04-10", "ModelA", "Line3", "Steel", "BATCH101", 95.0, 2, 0.7, 75.0, "scratch", 90.0, 400),
-                ("2025-04-10", "ModelB", "Line2", "Aluminum", "BATCH102", 97.5, 1, 0.6, 70.0, "dent", 88.0, 350),
-                ("2025-04-11", "ModelC", "Line1", "Copper", "BATCH137", 87.0, 3, 0.8, 81.0, "crack", 85.0, 350),
-                ("2025-04-10", "ModelD", "Line3", "Plastic", "BATCH104", 97.5, 4, 0.9, 78.0, "warp", 87.0, 300),
-                ("2025-04-10", "ModelE", "Line2", "Brass", "BATCH105", 90.0, 2, 0.65, 72.0, "chip", 89.0, 320),
-                ("2025-04-10", "ModelF", "Line1", "Titanium", "BATCH106", 95.0, 2, 0.75, 76.0, "scratch", 91.0, 380),
-                ("2025-04-09", "ModelA", "Line1", "Aluminum", "BATCH107", 97.5, 1, 0.6, 74.0, "dent", 92.0, 410),
-                ("2025-04-09", "ModelB", "Line2", "Aluminum", "BATCH108", 92.0, 3, 0.8, 79.0, "crack", 86.0, 340),
-                ("2025-04-09", "ModelC", "Line1", "Copper", "BATCH109", 88.5, 4, 0.85, 82.0, "warp", 84.0, 360),
-                ("2025-04-09", "ModelD", "Line3", "Plastic", "BATCH110", 90.0, 2, 0.7, 77.0, "chip", 88.0, 310),
-                ("2025-04-09", "ModelE", "Line2", "Brass", "BATCH111", 99.0, 0, 0.5, 70.0, "none", 93.0, 330),
-                ("2025-04-09", "ModelF", "Line1", "Titanium", "BATCH112", 85.5, 5, 0.9, 80.0, "scratch", 83.0, 370),
-                ("2025-04-11", "ModelA", "Line1", "Steel", "BATCH113", 93.0, 1, 0.4, 73.0, "dent", 90.0, 390),
-                ("2025-04-11", "ModelB", "Line2", "Aluminum", "BATCH114", 96.5, 2, 0.7, 71.0, "crack", 89.0, 360),
-                ("2025-04-11", "ModelD", "Line3", "Plastic", "BATCH115", 89.0, 3, 0.8, 79.0, "warp", 86.0, 320),
+                ("2025-05-01", "MachineX1", "OP001", "Automático", 120.5, 150.0, "Ninguno", "Completado", 45.2, 92),
+                ("2025-05-01", "MachineX2", "OP002", "Manual", 130.0, 140.0, "E001", "Pendiente", 50.1, 88),
+                ("2025-05-02", "MachineY1", "OP003", "Automático", 115.7, 160.0, "Ninguno", "No requerido", 42.8, 95),
+                ("2025-05-02", "MachineY2", "OP001", "Mantenimiento", 80.0, 0.0, "E002", "Completado", 0.0, 0),
+                ("2025-05-03", "MachineX1", "OP004", "Automático", 125.3, 155.0, "Ninguno", "Completado", 46.5, 90),
+                ("2025-05-03", "MachineZ1", "OP005", "Manual", 135.2, 145.0, "E003", "Pendiente", 48.9, 85),
+                ("2025-05-04", "MachineX2", "OP002", "Automático", 122.1, 152.0, "Ninguno", "No requerido", 44.7, 93),
+                ("2025-05-04", "MachineY1", "OP003", "Automático", 118.9, 158.0, "Ninguno", "Completado", 43.2, 94),
+                ("2025-05-05", "MachineZ2", "OP006", "Manual", 140.0, 142.0, "E001", "Pendiente", 49.5, 87),
+                ("2025-05-05", "MachineX1", "OP001", "Automático", 123.4, 149.0, "Ninguno", "Completado", 45.8, 91),
+                ("2025-05-06", "MachineY2", "OP004", "Automático", 119.2, 157.0, "Ninguno", "No requerido", 43.9, 96),
+                ("2025-05-06", "MachineZ1", "OP005", "Mantenimiento", 85.0, 0.0, "E002", "Completado", 0.0, 0),
+                ("2025-05-07", "MachineX2", "OP002", "Automático", 121.8, 151.0, "Ninguno", "Completado", 44.5, 92),
+                ("2025-05-07", "MachineY1", "OP003", "Manual", 132.5, 143.0, "E004", "Pendiente", 47.8, 89),
+                ("2025-05-08", "MachineZ2", "OP006", "Automático", 124.6, 156.0, "Ninguno", "No requerido", 45.1, 94),
             ]
             cursor.executemany("""
                 INSERT INTO machines (
-                    date, machine, production_line, material, batch_id, uptime, defects,
-                    vibration, temperature, defect_type, throughput, inventory_level
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    date, machine, operator_id, operation_mode, energy_consumption,
+                    production_rate, error_code, maintenance_status, cycle_time, quality_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, fixed_records)
         
         conn.commit()
@@ -223,8 +221,8 @@ async def get_all_machines(
         cursor = conn.cursor()
         
         base_query = """
-            SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
-                   vibration, temperature, defect_type, throughput, inventory_level
+            SELECT id, date, machine, operator_id, operation_mode, energy_consumption,
+                   production_rate, error_code, maintenance_status, cycle_time, quality_score
             FROM machines
         """
         
@@ -256,16 +254,14 @@ async def get_all_machines(
                 "id": row[0],
                 "date": row[1],
                 "machine": row[2],
-                "production_line": row[3],
-                "material": row[4],
-                "batch_id": row[5],
-                "uptime": row[6],
-                "defects": row[7],
-                "vibration": row[8],
-                "temperature": row[9],
-                "defect_type": row[10],
-                "throughput": row[11],
-                "inventory_level": row[12]
+                "operator_id": row[3],
+                "operation_mode": row[4],
+                "energy_consumption": row[5],
+                "production_rate": row[6],
+                "error_code": row[7],
+                "maintenance_status": row[8],
+                "cycle_time": row[9],
+                "quality_score": row[10]
             })
         return machines
     except Exception as e:
@@ -289,8 +285,8 @@ async def get_machine_records(
         cursor = conn.cursor()
         
         query = """
-            SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
-                   vibration, temperature, defect_type, throughput, inventory_level
+            SELECT id, date, machine, operator_id, operation_mode, energy_consumption,
+                   production_rate, error_code, maintenance_status, cycle_time, quality_score
             FROM machines 
             WHERE machine = ?
         """
@@ -322,16 +318,14 @@ async def get_machine_records(
                 "id": row[0],
                 "date": row[1],
                 "machine": row[2],
-                "production_line": row[3],
-                "material": row[4],
-                "batch_id": row[5],
-                "uptime": row[6],
-                "defects": row[7],
-                "vibration": row[8],
-                "temperature": row[9],
-                "defect_type": row[10],
-                "throughput": row[11],
-                "inventory_level": row[12]
+                "operator_id": row[3],
+                "operation_mode": row[4],
+                "energy_consumption": row[5],
+                "production_rate": row[6],
+                "error_code": row[7],
+                "maintenance_status": row[8],
+                "cycle_time": row[9],
+                "quality_score": row[10]
             })
         
         if not records:
