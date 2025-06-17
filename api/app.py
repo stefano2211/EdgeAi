@@ -45,16 +45,6 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 machine TEXT NOT NULL,
-<<<<<<< HEAD
-                operation_mode TEXT NOT NULL,
-                product_type TEXT NOT NULL,
-                cycle_time REAL NOT NULL,
-                error_count INTEGER NOT NULL,
-                pressure REAL NOT NULL,
-                power_consumption REAL NOT NULL,
-                status TEXT NOT NULL,
-                output_rate REAL NOT NULL
-=======
                 production_line TEXT NOT NULL,
                 material TEXT NOT NULL,
                 batch_id TEXT NOT NULL,
@@ -65,7 +55,6 @@ def init_db():
                 defect_type TEXT NOT NULL,
                 throughput REAL NOT NULL,
                 inventory_level INTEGER NOT NULL
->>>>>>> dev
             )
         """)
         
@@ -109,15 +98,9 @@ def init_db():
             ]
             cursor.executemany("""
                 INSERT INTO machines (
-<<<<<<< HEAD
-                    date, machine, operation_mode, product_type, cycle_time,
-                    error_count, pressure, power_consumption, status, output_rate
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-=======
                     date, machine, production_line, material, batch_id, uptime, defects,
                     vibration, temperature, defect_type, throughput, inventory_level
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
->>>>>>> dev
             """, fixed_records)
         
         conn.commit()
@@ -240,13 +223,8 @@ async def get_all_machines(
         cursor = conn.cursor()
         
         base_query = """
-<<<<<<< HEAD
-            SELECT id, date, machine, operation_mode, product_type, cycle_time,
-                   error_count, pressure, power_consumption, status, output_rate
-=======
             SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
                    vibration, temperature, defect_type, throughput, inventory_level
->>>>>>> dev
             FROM machines
         """
         
@@ -278,16 +256,6 @@ async def get_all_machines(
                 "id": row[0],
                 "date": row[1],
                 "machine": row[2],
-<<<<<<< HEAD
-                "operation_mode": row[3],
-                "product_type": row[4],
-                "cycle_time": row[5],
-                "error_count": row[6],
-                "pressure": row[7],
-                "power_consumption": row[8],
-                "status": row[9],
-                "output_rate": row[10]
-=======
                 "production_line": row[3],
                 "material": row[4],
                 "batch_id": row[5],
@@ -298,7 +266,6 @@ async def get_all_machines(
                 "defect_type": row[10],
                 "throughput": row[11],
                 "inventory_level": row[12]
->>>>>>> dev
             })
         return machines
     except Exception as e:
@@ -307,10 +274,7 @@ async def get_all_machines(
     finally:
         conn.close()
 
-<<<<<<< HEAD
-=======
 # Endpoint para obtener registros por máquina (protegido)
->>>>>>> dev
 @app.get("/machines/{machine}")
 async def get_machine_records(
     machine: str,
@@ -325,13 +289,8 @@ async def get_machine_records(
         cursor = conn.cursor()
         
         query = """
-<<<<<<< HEAD
-            SELECT id, date, machine, operation_mode, product_type, cycle_time,
-                   error_count, pressure, power_consumption, status, output_rate
-=======
             SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
                    vibration, temperature, defect_type, throughput, inventory_level
->>>>>>> dev
             FROM machines 
             WHERE machine = ?
         """
@@ -363,16 +322,6 @@ async def get_machine_records(
                 "id": row[0],
                 "date": row[1],
                 "machine": row[2],
-<<<<<<< HEAD
-                "operation_mode": row[3],
-                "product_type": row[4],
-                "cycle_time": row[5],
-                "error_count": row[6],
-                "pressure": row[7],
-                "power_consumption": row[8],
-                "status": row[9],
-                "output_rate": row[10]
-=======
                 "production_line": row[3],
                 "material": row[4],
                 "batch_id": row[5],
@@ -383,7 +332,6 @@ async def get_machine_records(
                 "defect_type": row[10],
                 "throughput": row[11],
                 "inventory_level": row[12]
->>>>>>> dev
             })
         
         if not records:

@@ -6,26 +6,16 @@ import logging
 import json
 import hashlib
 import re
-<<<<<<< HEAD
-=======
 import os
->>>>>>> dev
 from minio import Minio
 from minio.error import S3Error
 import pdfplumber
 import io
-<<<<<<< HEAD
-import os
-from qdrant_client import QdrantClient
-from qdrant_client.http import models
-from sentence_transformers import SentenceTransformer
-=======
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer
 from cryptography.fernet import Fernet, InvalidToken
 import inspect
->>>>>>> dev
 
 # Configuración del logger
 logging.basicConfig(level=logging.INFO)
@@ -71,10 +61,6 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
     """
     if not isinstance(date_str, str) or not date_str.strip():
         return None
-<<<<<<< HEAD
-    # Filtrar valores claramente no relacionados con fechas
-=======
->>>>>>> dev
     if any(keyword in date_str.lower() for keyword in ["model", "line", "batch", "aluminum", "steel", "plastic", "copper", "brass", "titanium", "chip", "crack", "dent", "scratch", "warp", "none"]):
         return None
     for fmt in DATE_FORMATS:
@@ -92,27 +78,15 @@ def detect_and_normalize_date(date_str: str) -> Optional[str]:
 def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
     """
     Detecta el campo que contiene fechas en los registros.
-<<<<<<< HEAD
-    Usa el campo cacheado si está disponible y el esquema no ha cambiado.
-=======
->>>>>>> dev
     """
     global DATE_FIELD_CACHE
     if not records or not fields_info:
         logger.warning("No records or fields_info provided for date detection")
         return None
 
-<<<<<<< HEAD
-    # Generar hash del esquema
     schema = json.dumps(fields_info, sort_keys=True)
     schema_hash = hashlib.md5(schema.encode()).hexdigest()
 
-    # Usar caché si es válido
-=======
-    schema = json.dumps(fields_info, sort_keys=True)
-    schema_hash = hashlib.md5(schema.encode()).hexdigest()
-
->>>>>>> dev
     if DATE_FIELD_CACHE["field"] and DATE_FIELD_CACHE["schema_hash"] == schema_hash:
         logger.info(f"Using cached date field: {DATE_FIELD_CACHE['field']}")
         return DATE_FIELD_CACHE["field"]
@@ -124,13 +98,7 @@ def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
 
     best_candidate = None
     best_score = 0
-<<<<<<< HEAD
-    # Limitar a 10 registros
     for field in key_values.keys():
-        # Excluir campos no relacionados con fechas
-=======
-    for field in key_values.keys():
->>>>>>> dev
         if any(keyword in field.lower() for keyword in ["machine", "production_line", "material", "batch_id", "defect_type"]):
             continue
         sample_values = [r.get(field) for r in records[:10] if field in r]
@@ -155,39 +123,6 @@ def find_date_field(records: List[Dict], fields_info: Dict) -> Optional[str]:
         logger.warning("No date field detected in the provided records")
         return None
 
-<<<<<<< HEAD
-def check_date_coverage(data: List[Dict], start_date: str, end_date: str) -> Dict:
-    """
-    Verifica la cobertura de fechas en los datos.
-    """
-    if not data:
-        return {
-            "has_data": False,
-            "covered_dates": [],
-            "message": f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
-        }
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-    expected_dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((end - start).days + 1)]
-    covered_dates = sorted(set(r["date"] for r in data if r.get("date") and r["date"] != "Desconocida"))
-    if not covered_dates:
-        return {
-            "has_data": False,
-            "covered_dates": [],
-            "message": f"No se encontraron registros con fechas válidas en el rango del {start_date} al {end_date}."
-        }
-    has_start = start_date in covered_dates
-    has_end = end_date in covered_dates
-    missing_dates = [d for d in expected_dates if d not in covered_dates]
-    if not missing_dates:
-        message = "Se encontraron registros para todas las fechas en el rango solicitado."
-    elif has_start and not has_end:
-        message = f"Se encontraron registros para {start_date}, pero no para {end_date} ni fechas posteriores en el rango."
-    elif covered_dates:
-        message = f"Solo se encontraron datos para las fechas {', '.join(covered_dates)} dentro del rango solicitado."
-    else:
-        message = f"No se encontraron registros en el rango de fechas del {start_date} al {end_date}."
-=======
 def check_date_coverage(data: List[Dict], start_date: Optional[str], end_date: Optional[str], specific_dates: Optional[List[str]] = None) -> Dict:
     """
     Verifica la cobertura de fechas en los datos, considerando fechas específicas o rango de fechas.
@@ -232,7 +167,6 @@ def check_date_coverage(data: List[Dict], start_date: Optional[str], end_date: O
     else:
         message = "Datos recuperados exitosamente sin filtros de fecha."
 
->>>>>>> dev
     return {
         "has_data": bool(covered_dates),
         "covered_dates": covered_dates,
@@ -241,20 +175,11 @@ def check_date_coverage(data: List[Dict], start_date: Optional[str], end_date: O
 
 class AuthClient:
     """
-<<<<<<< HEAD
-    Cliente para autenticación con la API.
-    """
-    def __init__(self, base_url: str, username: str, password: str):
-        self.base_url = base_url
-        self.username = username
-        self.password = password
-=======
     Cliente para autenticación con la API principal y la API de tokens.
     """
     def __init__(self, api_url: str, token_api_url: str):
         self.api_url = api_url
         self.token_api_url = token_api_url
->>>>>>> dev
         self.client = httpx.Client()
         self.token = None
 
@@ -276,11 +201,7 @@ class AuthClient:
     def get(self, endpoint: str, params: Optional[Dict] = None) -> httpx.Response:
         """Realiza una solicitud GET a la API principal, obteniendo un token si es necesario."""
         if not self.token:
-<<<<<<< HEAD
-            self.authenticate()
-=======
             self.fetch_token()
->>>>>>> dev
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
             response = self.client.get(
@@ -298,25 +219,13 @@ class AuthClient:
                     headers=headers,
                     params=params
                 )
-<<<<<<< HEAD
-            logger.info(f"HTTP Request: GET {self.base_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
-=======
             logger.info(f"HTTP Request: GET {self.api_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
->>>>>>> dev
             return response
         except Exception as e:
             logger.error(f"Error en solicitud GET: {str(e)}")
             raise
 
     def post(self, endpoint: str, json_data: Optional[Dict] = None) -> httpx.Response:
-<<<<<<< HEAD
-        if not self.token:
-            self.authenticate()
-        headers = {"Authorization": f"Bearer {self.token}"}
-        try:
-            response = self.client.post(
-                f"{self.base_url}{endpoint}",
-=======
         """Realiza una solicitud POST a la API principal, obteniendo un token si es necesario."""
         if not self.token:
             self.fetch_token()
@@ -324,22 +233,10 @@ class AuthClient:
         try:
             response = self.client.post(
                 f"{self.api_url}{endpoint}",
->>>>>>> dev
                 headers=headers,
                 json=json_data
             )
             if response.status_code == 401:
-<<<<<<< HEAD
-                logger.info("Token inválido, reautenticando...")
-                self.authenticate()
-                headers = {"Authorization": f"Bearer {self.token}"}
-                response = self.client.post(
-                    f"{self.base_url}{endpoint}",
-                    headers=headers,
-                    json=json_data
-                )
-            logger.info(f"HTTP Request: POST {self.base_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
-=======
                 logger.info("Token inválido, obteniendo nuevo token...")
                 self.token = None
                 self.fetch_token()
@@ -350,7 +247,6 @@ class AuthClient:
                     json=json_data
                 )
             logger.info(f"HTTP Request: POST {self.api_url}{endpoint} \"HTTP/1.1 {response.status_code}\"")
->>>>>>> dev
             return response
         except Exception as e:
             logger.error(f"Error en solicitud POST: {str(e)}")
@@ -390,22 +286,6 @@ class DataValidator:
         return normalized_date
 
     @staticmethod
-<<<<<<< HEAD
-    def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict) -> Dict:
-        try:
-            fields_info = json.loads(list_fields(ctx))
-            if fields_info["status"] != "success":
-                raise ValueError("No se pudo validar contra la API")
-            if "start_date" in key_values or "end_date" in key_values:
-                if "start_date" not in key_values or "end_date" not in key_values:
-                    raise ValueError("Se deben proporcionar tanto start_date como end_date")
-                start_date = DataValidator.validate_date(key_values["start_date"], "start_date")
-                end_date = DataValidator.validate_date(key_values["end_date"], "end_date")
-                if start_date > end_date:
-                    raise ValueError("start_date no puede ser posterior a end_date")
-                key_values["start_date"] = start_date
-                key_values["end_date"] = end_date
-=======
     def validate_fields(ctx: Context, key_figures: List[str], key_values: Dict, start_date: Optional[str] = None, end_date: Optional[str] = None, specific_dates: Optional[List[str]] = None) -> Dict:
         try:
             fields_info = json.loads(list_fields(ctx))
@@ -425,7 +305,6 @@ class DataValidator:
                 specific_dates = [DataValidator.validate_date(d, f"specific_date[{i}]") for i, d in enumerate(specific_dates)]
                 if not specific_dates:
                     raise ValueError("No se proporcionaron fechas válidas en specific_dates")
->>>>>>> dev
             errors = []
             invalid_figures = [f for f in key_figures if f not in fields_info["key_figures"]]
             if invalid_figures:
@@ -433,11 +312,6 @@ class DataValidator:
                 errors.append(f"Campos numéricos inválidos: {invalid_figures}. Campos disponibles: {', '.join(valid_figures)}.")
             invalid_values = {}
             for k, v in key_values.items():
-<<<<<<< HEAD
-                if k in ["start_date", "end_date"]:
-                    continue
-=======
->>>>>>> dev
                 if k not in fields_info["key_values"]:
                     invalid_values[k] = v
                     errors.append(f"Campo categórico inválido: '{k}'. Campos disponibles: {', '.join(fields_info['key_values'].keys())}.")
@@ -452,8 +326,6 @@ class DataValidator:
             logger.error(f"Fallo en validación de campos: {str(e)}")
             raise
 
-<<<<<<< HEAD
-=======
 def fetch_mes_data(
     ctx: Context,
     key_values: Optional[Dict[str, str]] = None,
@@ -637,7 +509,6 @@ def fetch_mes_data(
             "covered_dates": []
         }, ensure_ascii=False)
 
->>>>>>> dev
 @mcp.tool()
 def get_pdf_content(ctx: Context, filename: str) -> str:
     """
@@ -651,11 +522,7 @@ def get_pdf_content(ctx: Context, filename: str) -> str:
             response.release_conn()
         except S3Error as e:
             available_pdfs = [obj.object_name for obj in minio_client.list_objects(MINIO_BUCKET)]
-<<<<<<< HEAD
-            logger.error(f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}")
-=======
             logger.warning(f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}")
->>>>>>> dev
             return json.dumps({
                 "status": "error",
                 "message": f"PDF not found: {filename}. Available PDFs: {', '.join(available_pdfs)}",
@@ -720,144 +587,6 @@ def list_fields(ctx: Context) -> str:
         }, ensure_ascii=False)
 
 @mcp.tool()
-<<<<<<< HEAD
-def fetch_mes_data(
-    ctx: Context,
-    key_values: Optional[Dict[str, str]] = None,
-    key_figures: Optional[List[str]] = None
-) -> str:
-    """
-    Recupera datos MES de la API y Qdrant.
-    """
-    try:
-        key_values = key_values or {}
-        key_figures = key_figures or []
-        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
-        valid_figures = fields_info["key_figures"]
-        valid_values = fields_info["key_values"]
-        logger.info(f"Fetching MES data for key_values={key_values}, key_figures={key_figures}")
-        start_date = key_values.get("start_date")
-        end_date = key_values.get("end_date")
-        must_conditions = []
-        for k, v in key_values.items():
-            if k not in ["start_date", "end_date"] and k in valid_values:
-                must_conditions.append(models.FieldCondition(key=k, match=models.MatchValue(value=v)))
-        if start_date and end_date:
-            try:
-                start = datetime.strptime(start_date, "%Y-%m-%d")
-                end = datetime.strptime(end_date, "%Y-%m-%d")
-                delta = (end - start).days + 1
-                if delta > 0:
-                    date_range = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta)]
-                    must_conditions.append(models.FieldCondition(
-                        key="date",
-                        match=models.MatchAny(any=date_range)
-                    ))
-            except ValueError as e:
-                logger.error(f"Invalid date format: {str(e)}")
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Invalid date format: {str(e)}",
-                    "count": 0,
-                    "data": [],
-                    "covered_dates": []
-                }, ensure_ascii=False)
-        qdrant_results = qdrant_client.scroll(
-            collection_name="mes_logs",
-            scroll_filter=models.Filter(must=must_conditions) if must_conditions else None,
-            limit=1000
-        )
-        processed_data = [r.payload for r in qdrant_results[0]] if qdrant_results[0] else []
-        logger.info(f"Fetched {len(processed_data)} records from Qdrant for {key_values}")
-        params = {}
-        if start_date and end_date:
-            params.update({"start_date": start_date, "end_date": end_date})
-        response = auth_client.get("/machines/", params=params)
-        response.raise_for_status()
-        all_data = response.json()
-        date_field = find_date_field(all_data, fields_info)
-        logger.info(f"Detected date field: {date_field}")
-        full_data = []
-        for record in all_data:
-            item = {}
-            if date_field and date_field in record:
-                normalized_date = detect_and_normalize_date(str(record[date_field]))
-                item["date"] = normalized_date or "Desconocida"
-            else:
-                item["date"] = "Desconocida"
-            for field in valid_figures + list(valid_values.keys()):
-                if field in record:
-                    item[field] = record[field]
-            full_data.append(item)
-        if full_data and start_date and end_date:
-            try:
-                start = datetime.strptime(start_date, "%Y-%m-%d")
-                end = datetime.strptime(end_date, "%Y-%m-%d")
-                delta = (end - start).days + 1
-                if delta > 0:
-                    for i, record in enumerate(full_data):
-                        if record["date"] == "Desconocida":
-                            record["date"] = (start + timedelta(days=i % delta)).strftime("%Y-%m-%d")
-            except ValueError:
-                pass
-        if full_data:
-            points = [
-                models.PointStruct(
-                    id=hashlib.md5(json.dumps(r).encode()).hexdigest(),
-                    vector=model.encode(json.dumps(r)).tolist(),
-                    payload=r
-                ) for r in full_data
-            ]
-            qdrant_client.upsert(collection_name="mes_logs", points=points)
-            logger.info(f"Stored {len(points)} points in Qdrant mes_logs")
-        if not processed_data:
-            data_filters = {k: v for k, v in key_values.items() if k not in ["start_date", "end_date"]}
-            processed_data = [
-                r for r in full_data
-                if all(r.get(k) == v for k, v in data_filters.items())
-            ]
-            logger.info(f"Filtered {len(processed_data)} records in memory for {data_filters}")
-        if key_figures:
-            missing_figures = [k for k in key_figures if not any(k in r for r in processed_data)]
-            if missing_figures:
-                logger.warning(f"Missing key_figures in data: {missing_figures}")
-                return json.dumps({
-                    "status": "no_data",
-                    "count": 0,
-                    "data": [],
-                    "message": f"No data found for fields: {', '.join(missing_figures)}.",
-                    "covered_dates": []
-                }, ensure_ascii=False)
-        response_fields = ["date"] + list(key_values.keys()) + key_figures
-        response_data = [
-            {k: r[k] for k in response_fields if k in r}
-            for r in processed_data
-        ]
-        coverage = check_date_coverage(response_data, start_date, end_date) if start_date and end_date else {
-            "has_data": bool(response_data),
-            "covered_dates": [],
-            "message": "No date range specified" if not response_data else "Data retrieved successfully"
-        }
-        return json.dumps({
-            "status": "success" if response_data else "no_data",
-            "count": len(response_data),
-            "data": response_data,
-            "message": coverage["message"],
-            "covered_dates": coverage["covered_dates"]
-        }, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Data retrieval failed: {str(e)}")
-        return json.dumps({
-            "status": "error",
-            "message": str(e),
-            "count": 0,
-            "data": [],
-            "covered_dates": []
-        }, ensure_ascii=False)
-
-@mcp.tool()
-=======
->>>>>>> dev
 def add_custom_rule(
     ctx: Context,
     machines: Union[List[str], str],
@@ -1108,79 +837,6 @@ def analyze_compliance(
     """
     Analiza el cumplimiento de los datos MES contra reglas SOP y personalizadas.
 
-<<<<<<< HEAD
-    INSTRUCCIONES PARA EL LLM:
-    1. Antes de construir la consulta, llama a la función `list_fields` para obtener los campos disponibles en el dataset MES.
-    2. Usa los campos listados en `key_figures` (campos numéricos) y `key_values` (campos categóricos) para armar la consulta.
-    3. Solo utiliza campos que estén presentes en la respuesta de `list_fields`.
-    4. La estructura de la consulta debe ser:
-
-        {
-            "key_values": {
-                "<campo_categórico_1>": "<valor>",
-                "<campo_categórico_2>": "<valor>",
-                "start_date": "2025-04-09",
-                "end_date": "2025-04-11"
-            },
-            "key_figures": [
-                "<campo_numérico_1>",
-                "<campo_numérico_2>"
-            ]
-        }
-
-    5. Ejemplo dinámico (los campos deben ser seleccionados de la respuesta de `list_fields`):
-
-        Supón que `list_fields` devuelve:
-        {
-            "key_figures": ["temperature", "uptime", "vibration"],
-            "key_values": {
-                "machine": ["ModelA", "ModelB"],
-                "production_line": ["Line1", "Line2", "Line3"]
-            }
-        }
-
-        Entonces, una consulta válida sería:
-        {
-            "key_values": {
-                "machine": "ModelA",
-                "production_line": "Line3",
-                "start_date": "2025-04-09",
-                "end_date": "2025-04-11"
-            },
-            "key_figures": ["temperature", "uptime", "vibration"]
-        }
-
-    Args:
-        ctx (Context): Contexto de la solicitud FastMCP.
-        key_values (Optional[Dict[str, str]]): Diccionario de campos categóricos y valores para filtrar.
-        key_figures (Optional[List[str]]): Lista de campos numéricos a analizar.
-
-    Returns:
-        str: JSON con el análisis de cumplimiento.
-    """
-    try:
-        key_values = key_values or {}
-        key_figures = key_figures or []
-        fields_info = DataValidator.validate_fields(ctx, key_figures, key_values)
-        valid_values = fields_info["key_values"]
-        valid_figures = fields_info["key_figures"]
-        logger.info(f"Analyzing compliance: key_figures={key_figures}, key_values={key_values}")
-
-        # Identificar el campo y valor para la máquina
-        identifier_field = None
-        identifier_value = None
-        for field in valid_values:
-            if field not in ["start_date", "end_date"] and field in key_values:
-                identifier_field = field
-                identifier_value = key_values[field]
-                break
-        if not identifier_field and valid_values:
-            identifier_field = next(iter(valid_values))
-            identifier_value = key_values.get(identifier_field)
-
-        # Obtener datos MES
-        fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures))
-=======
     Esta función recupera datos del sistema MES, los compara con procedimientos operativos estándar (SOPs)
     almacenados en MinIO y reglas personalizadas en Qdrant, y genera un informe de cumplimiento.
 
@@ -1315,7 +971,6 @@ def analyze_compliance(
         logger.info(f"Selected identifier_field: {identifier_field}, identifier_value: {identifier_value}")
 
         fetch_result = json.loads(fetch_mes_data(ctx, key_values, key_figures, start_date, end_date, specific_dates))
->>>>>>> dev
         analysis_notes = [fetch_result.get("message", "")] if fetch_result.get("message") else []
 
         if fetch_result["status"] == "no_data":
@@ -1323,11 +978,7 @@ def analyze_compliance(
             return json.dumps({
                 "status": "no_data",
                 "message": fetch_result["message"],
-<<<<<<< HEAD
-                "period": f"{key_values.get('start_date', 'N/A')} to {key_values.get('end_date', 'N/A')}",
-=======
                 "period": f"{start_date or 'N/A'} to {end_date or 'N/A'}" if start_date else f"Specific dates: {specific_dates or 'N/A'}",
->>>>>>> dev
                 "identifier": f"{identifier_field}={identifier_value}" if identifier_field and identifier_value else "all records",
                 "metrics_analyzed": key_figures,
                 "results": [],
@@ -1344,8 +995,6 @@ def analyze_compliance(
                 "results": [],
                 "analysis_notes": analysis_notes
             }, ensure_ascii=False)
-<<<<<<< HEAD
-=======
 
         date_field = find_date_field(fetch_result["data"], fields_info)
         logger.info(f"Date field for compliance analysis: {date_field}")
@@ -1367,69 +1016,26 @@ def analyze_compliance(
         else:
             analysis_notes.append("No identifier field or identifiers found; no SOPs loaded.")
             logger.info("No identifier field or identifiers found; no SOPs loaded.")
->>>>>>> dev
 
-        # Identificar el campo de fecha
-        date_field = find_date_field(fetch_result["data"], fields_info)
-        logger.info(f"Date field for compliance analysis: {date_field}")
-        if not date_field:
-            analysis_notes.append("No date field detected; date filters ignored.")
-
-        # Obtener contenido de PDFs para cada máquina
-        identifiers = {r[identifier_field] for r in fetch_result["data"] if identifier_field in r} if identifier_field else set()
-        sop_content = {}
-        for identifier in identifiers:
-            if identifier_field == "machine":
-                pdf_result = json.loads(get_pdf_content(ctx, f"{identifier}.pdf"))
-                if pdf_result["status"] == "success":
-                    sop_content[identifier] = pdf_result["content"]
-                    logger.info(f"SOP content for {identifier_field}={identifier}: {sop_content[identifier][:100]}...")
-                else:
-                    sop_content[identifier] = ""
-                    analysis_notes.append(f"Failed to load SOP for {identifier}: {pdf_result['message']}")
-                    logger.warning(f"Failed to load SOP for {identifier}: {pdf_result['message']}")
-            else:
-                sop_content[identifier] = ""
-                analysis_notes.append(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
-                logger.info(f"No SOP loaded for {identifier_field}={identifier} (not a machine).")
-
-        # Obtener reglas personalizadas
         custom_rules = []
-<<<<<<< HEAD
-        if identifiers and identifier_field == "machine":
-            custom_result = qdrant_client.scroll(
-                collection_name="custom_rules",
-                scroll_filter=models.Filter(must=[
-                    models.FieldCondition(key="machines", match=models.MatchAny(any=list(identifiers))),
-=======
         if identifiers and identifier_field:
             custom_result = qdrant_client.scroll(
                 collection_name="custom_rules",
                 scroll_filter=models.Filter(must=[
                     models.FieldCondition(key=identifier_field, match=models.MatchAny(any=list(identifiers))),
->>>>>>> dev
                 ]),
                 limit=100
             )
             custom_rules = [r.payload for r in custom_result[0]] if custom_result and custom_result[0] else []
-<<<<<<< HEAD
-            logger.info(f"Custom rules: {len(custom_rules)}")
-=======
             logger.info(f"Custom rules found: {len(custom_rules)}")
->>>>>>> dev
 
-        # Preparar resultados para el LLM
         results = []
         for record in fetch_result["data"]:
             analysis = {
                 "date": record.get("date", "Desconocida")
             }
             for k in key_values:
-<<<<<<< HEAD
-                if k not in ["start_date", "end_date"] and k in record:
-=======
                 if k in record:
->>>>>>> dev
                     analysis[k] = record[k]
             analysis.update({
                 "metrics": {k: record[k] for k in key_figures if k in record}
@@ -1460,8 +1066,6 @@ def analyze_compliance(
             "message": str(e),
             "results": [],
             "analysis_notes": [str(e)]
-<<<<<<< HEAD
-=======
         }, ensure_ascii=False)
 
 @mcp.tool()
@@ -1746,7 +1350,6 @@ def list_available_tools(ctx: Context) -> str:
             "message": str(e),
             "count": 0,
             "tools": []
->>>>>>> dev
         }, ensure_ascii=False)
 
 if __name__ == "__main__":
