@@ -2,12 +2,13 @@ from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 import jwt
 import uuid
 from typing import Optional, List
 import os
 import logging
+import bcrypt
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
@@ -16,12 +17,15 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # Configuración
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")  # Cambia en producción
 ALGORITHM = "HS256"
-TOKEN_EXPIRE_MINUTES = 60
 
-# Modelo para login
+# Modelos
 class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class RegisterRequest(BaseModel):
     username: str
     password: str
 
@@ -30,17 +34,18 @@ security = HTTPBearer()
 
 # Inicialización de la base de datos
 def init_db():
-    """Inicializa la base de datos SQLite con tablas para equipos, sesiones y usuarios."""
+    """Inicializa la base de datos SQLite con tablas para máquinas, sesiones y usuarios."""
     try:
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
         
-        # Tabla para equipos (usando date en formato YYYY-MM-DD)
+        # Tabla para máquinas
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS machines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 machine TEXT NOT NULL,
+<<<<<<< HEAD
                 operation_mode TEXT NOT NULL,
                 product_type TEXT NOT NULL,
                 cycle_time REAL NOT NULL,
@@ -49,15 +54,27 @@ def init_db():
                 power_consumption REAL NOT NULL,
                 status TEXT NOT NULL,
                 output_rate REAL NOT NULL
+=======
+                production_line TEXT NOT NULL,
+                material TEXT NOT NULL,
+                batch_id TEXT NOT NULL,
+                uptime REAL NOT NULL,
+                defects INTEGER NOT NULL,
+                vibration REAL NOT NULL,
+                temperature REAL NOT NULL,
+                defect_type TEXT NOT NULL,
+                throughput REAL NOT NULL,
+                inventory_level INTEGER NOT NULL
+>>>>>>> dev
             )
         """)
         
-        # Tabla para tokens de sesión
+        # Tabla para tokens de sesión (expiry ahora es opcional)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
-                expiry DATETIME NOT NULL
+                expiry DATETIME
             )
         """)
         
@@ -68,30 +85,39 @@ def init_db():
                 password TEXT NOT NULL
             )
         """)
-        cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES (?, ?)", 
-                       ("admin", "password123"))
         
-        # Insertar registros fijos para equipos
+        # Insertar registros fijos para máquinas
         cursor.execute("SELECT COUNT(*) FROM machines")
         count = cursor.fetchone()[0]
         if count == 0:
             fixed_records = [
-                ("2025-05-20", "EquipA", "Auto", "WidgetA", 12.5, 1, 5.2, 15.0, "Running", 120.0),
-                ("2025-05-20", "EquipB", "Manual", "WidgetB", 14.0, 2, 4.8, 16.5, "Running", 110.0),
-                ("2025-05-20", "EquipC", "Auto", "WidgetC", 11.8, 0, 5.0, 14.5, "Running", 125.0),
-                ("2025-05-21", "EquipA", "Auto", "WidgetA", 13.0, 3, 5.5, 15.8, "Stopped", 100.0),
-                ("2025-05-21", "EquipB", "Auto", "WidgetB", 12.7, 1, 4.9, 15.2, "Running", 115.0),
-                ("2025-05-21", "EquipD", "Manual", "WidgetD", 15.0, 4, 5.3, 17.0, "Stopped", 95.0),
-                ("2025-05-22", "EquipA", "Auto", "WidgetA", 12.3, 0, 5.1, 14.8, "Running", 122.0),
-                ("2025-05-22", "EquipC", "Auto", "WidgetC", 11.5, 2, 5.0, 14.0, "Running", 130.0),
-                ("2025-05-22", "EquipB", "Manual", "WidgetB", 14.5, 1, 4.7, 16.0, "Running", 108.0),
-                ("2025-05-22", "EquipD", "Auto", "WidgetD", 13.8, 2, 5.4, 16.2, "Running", 112.0),
+                ("2025-04-10", "ModelA", "Line3", "Steel", "BATCH101", 95.0, 2, 0.7, 75.0, "scratch", 90.0, 400),
+                ("2025-04-10", "ModelB", "Line2", "Aluminum", "BATCH102", 97.5, 1, 0.6, 70.0, "dent", 88.0, 350),
+                ("2025-04-11", "ModelC", "Line1", "Copper", "BATCH137", 87.0, 3, 0.8, 81.0, "crack", 85.0, 350),
+                ("2025-04-10", "ModelD", "Line3", "Plastic", "BATCH104", 97.5, 4, 0.9, 78.0, "warp", 87.0, 300),
+                ("2025-04-10", "ModelE", "Line2", "Brass", "BATCH105", 90.0, 2, 0.65, 72.0, "chip", 89.0, 320),
+                ("2025-04-10", "ModelF", "Line1", "Titanium", "BATCH106", 95.0, 2, 0.75, 76.0, "scratch", 91.0, 380),
+                ("2025-04-09", "ModelA", "Line1", "Aluminum", "BATCH107", 97.5, 1, 0.6, 74.0, "dent", 92.0, 410),
+                ("2025-04-09", "ModelB", "Line2", "Aluminum", "BATCH108", 92.0, 3, 0.8, 79.0, "crack", 86.0, 340),
+                ("2025-04-09", "ModelC", "Line1", "Copper", "BATCH109", 88.5, 4, 0.85, 82.0, "warp", 84.0, 360),
+                ("2025-04-09", "ModelD", "Line3", "Plastic", "BATCH110", 90.0, 2, 0.7, 77.0, "chip", 88.0, 310),
+                ("2025-04-09", "ModelE", "Line2", "Brass", "BATCH111", 99.0, 0, 0.5, 70.0, "none", 93.0, 330),
+                ("2025-04-09", "ModelF", "Line1", "Titanium", "BATCH112", 85.5, 5, 0.9, 80.0, "scratch", 83.0, 370),
+                ("2025-04-11", "ModelA", "Line1", "Steel", "BATCH113", 93.0, 1, 0.4, 73.0, "dent", 90.0, 390),
+                ("2025-04-11", "ModelB", "Line2", "Aluminum", "BATCH114", 96.5, 2, 0.7, 71.0, "crack", 89.0, 360),
+                ("2025-04-11", "ModelD", "Line3", "Plastic", "BATCH115", 89.0, 3, 0.8, 79.0, "warp", 86.0, 320),
             ]
             cursor.executemany("""
                 INSERT INTO machines (
+<<<<<<< HEAD
                     date, machine, operation_mode, product_type, cycle_time,
                     error_count, pressure, power_consumption, status, output_rate
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+=======
+                    date, machine, production_line, material, batch_id, uptime, defects,
+                    vibration, temperature, defect_type, throughput, inventory_level
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+>>>>>>> dev
             """, fixed_records)
         
         conn.commit()
@@ -108,27 +134,16 @@ async def startup_event():
 
 # Generar token JWT
 def create_jwt_token(username: str) -> str:
-    """Genera un token JWT para un usuario dado.
-
-    Args:
-        username (str): Nombre de usuario para incluir en el token.
-
-    Returns:
-        str: Token JWT generado.
-
-    Raises:
-        Exception: Si falla la generación del token o el almacenamiento en la base de datos.
-    """
+    """Genera un token JWT para un usuario dado sin tiempo de expiración."""
     try:
-        expire = datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
-        to_encode = {"sub": username, "exp": expire, "jti": str(uuid.uuid4())}
+        to_encode = {"sub": username, "jti": str(uuid.uuid4())}
         token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
         
-        # Almacenar token en la base de datos
+        # Almacenar token en la base de datos con expiry NULL
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
         cursor.execute("INSERT INTO sessions (token, username, expiry) VALUES (?, ?, ?)",
-                       (token, username, expire.isoformat()))
+                       (token, username, None))
         conn.commit()
         return token
     except Exception as e:
@@ -139,38 +154,51 @@ def create_jwt_token(username: str) -> str:
 
 # Validar token
 async def validate_token(credentials: HTTPAuthorizationCredentials = Security(security)):
-    """Valida un token JWT proporcionado en el encabezado de autorización.
-
-    Args:
-        credentials (HTTPAuthorizationCredentials): Credenciales extraídas del encabezado.
-
-    Returns:
-        str: Nombre de usuario asociado al token.
-
-    Raises:
-        HTTPException: Si el token es inválido, expirado o no existe.
-    """
+    """Valida un token JWT proporcionado en el encabezado de autorización."""
     try:
         token = credentials.credentials
-        conn = sqlite3.connect('database.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT username, expiry FROM sessions WHERE token = ?", (token,))
-        session = cursor.fetchone()
-        
-        if not session:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        
-        username, expiry = session
-        if datetime.fromisoformat(expiry) < datetime.utcnow():
-            raise HTTPException(status_code=401, detail="Token expired")
-        
-        # Verificar JWT
-        jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # Validar solo con JWT, sin verificar expiración
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token: No username")
         return username
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.PyJWTError as e:
+        logger.error(f"JWT validation failed: {str(e)}")
+        raise HTTPException(status_code=401, detail="Invalid or malformed token")
     except Exception as e:
         logger.error(f"Token validation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Endpoint de registro
+@app.post("/register")
+async def register(request: RegisterRequest):
+    """Registra un nuevo usuario en la base de datos."""
+    try:
+        conn = sqlite3.connect('database.db')
+        cursor = conn.cursor()
+        
+        # Verificar si el usuario ya existe
+        cursor.execute("SELECT username FROM users WHERE username = ?", (request.username,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        # Hashear la contraseña
+        hashed_password = bcrypt.hashpw(request.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # Insertar nuevo usuario
+        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)",
+                       (request.username, hashed_password))
+        conn.commit()
+        
+        # Generar token para el nuevo usuario
+        token = create_jwt_token(request.username)
+        
+        return {"access_token": token, "token_type": "bearer", "message": "User registered successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Registration failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
@@ -178,24 +206,14 @@ async def validate_token(credentials: HTTPAuthorizationCredentials = Security(se
 # Endpoint de login
 @app.post("/login")
 async def login(request: LoginRequest):
-    """Autentica a un usuario y genera un token JWT.
-
-    Args:
-        request (LoginRequest): Objeto con username y password.
-
-    Returns:
-        dict: Diccionario con el token de acceso y el tipo de token.
-
-    Raises:
-        HTTPException: Si las credenciales son inválidas (401).
-    """
+    """Autentica a un usuario y genera un token JWT."""
     try:
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
         cursor.execute("SELECT password FROM users WHERE username = ?", (request.username,))
         user = cursor.fetchone()
         
-        if not user or user[0] != request.password:
+        if not user or not bcrypt.checkpw(request.password.encode('utf-8'), user[0].encode('utf-8')):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
         token = create_jwt_token(request.username)
@@ -216,14 +234,19 @@ async def get_all_machines(
     specific_date: Optional[str] = None,
     username: str = Depends(validate_token)
 ):
-    """Obtiene todos los registros de equipos, opcionalmente filtrados por fechas."""
+    """Obtiene todos los registros de máquinas, opcionalmente filtrados por fechas."""
     try:
         conn = sqlite3.connect("database.db")
         cursor = conn.cursor()
         
         base_query = """
+<<<<<<< HEAD
             SELECT id, date, machine, operation_mode, product_type, cycle_time,
                    error_count, pressure, power_consumption, status, output_rate
+=======
+            SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
+                   vibration, temperature, defect_type, throughput, inventory_level
+>>>>>>> dev
             FROM machines
         """
         
@@ -249,12 +272,13 @@ async def get_all_machines(
         
         cursor.execute(query, params)
         
-        records = []
+        machines = []
         for row in cursor.fetchall():
-            records.append({
+            machines.append({
                 "id": row[0],
                 "date": row[1],
                 "machine": row[2],
+<<<<<<< HEAD
                 "operation_mode": row[3],
                 "product_type": row[4],
                 "cycle_time": row[5],
@@ -263,14 +287,30 @@ async def get_all_machines(
                 "power_consumption": row[8],
                 "status": row[9],
                 "output_rate": row[10]
+=======
+                "production_line": row[3],
+                "material": row[4],
+                "batch_id": row[5],
+                "uptime": row[6],
+                "defects": row[7],
+                "vibration": row[8],
+                "temperature": row[9],
+                "defect_type": row[10],
+                "throughput": row[11],
+                "inventory_level": row[12]
+>>>>>>> dev
             })
-        return records
+        return machines
     except Exception as e:
-        logger.error(f"Failed to fetch equipment records: {str(e)}")
+        logger.error(f"Failed to fetch machines: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 
+<<<<<<< HEAD
+=======
+# Endpoint para obtener registros por máquina (protegido)
+>>>>>>> dev
 @app.get("/machines/{machine}")
 async def get_machine_records(
     machine: str,
@@ -279,14 +319,19 @@ async def get_machine_records(
     specific_date: Optional[str] = None,
     username: str = Depends(validate_token)
 ):
-    """Obtiene registros para un equipo específico, opcionalmente filtrados por fechas."""
+    """Obtiene registros para una máquina específica, opcionalmente filtrados por fechas."""
     try:
         conn = sqlite3.connect("database.db")
         cursor = conn.cursor()
         
         query = """
+<<<<<<< HEAD
             SELECT id, date, machine, operation_mode, product_type, cycle_time,
                    error_count, pressure, power_consumption, status, output_rate
+=======
+            SELECT id, date, machine, production_line, material, batch_id, uptime, defects,
+                   vibration, temperature, defect_type, throughput, inventory_level
+>>>>>>> dev
             FROM machines 
             WHERE machine = ?
         """
@@ -318,6 +363,7 @@ async def get_machine_records(
                 "id": row[0],
                 "date": row[1],
                 "machine": row[2],
+<<<<<<< HEAD
                 "operation_mode": row[3],
                 "product_type": row[4],
                 "cycle_time": row[5],
@@ -326,16 +372,28 @@ async def get_machine_records(
                 "power_consumption": row[8],
                 "status": row[9],
                 "output_rate": row[10]
+=======
+                "production_line": row[3],
+                "material": row[4],
+                "batch_id": row[5],
+                "uptime": row[6],
+                "defects": row[7],
+                "vibration": row[8],
+                "temperature": row[9],
+                "defect_type": row[10],
+                "throughput": row[11],
+                "inventory_level": row[12]
+>>>>>>> dev
             })
         
         if not records:
-            raise HTTPException(status_code=404, detail="Equipo no encontrado")
+            raise HTTPException(status_code=404, detail="Máquina no encontrada")
         
         return records
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to fetch equipment records: {str(e)}")
+        logger.error(f"Failed to fetch machine records: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
